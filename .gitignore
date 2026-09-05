@@ -1,0 +1,16 @@
+build/
+artifacts/
+DerivedData/
+.build/
+.DS_Store
+xcuserdata/
+*.xcuserstate
+*.xcresult/
+*.dSYM/
+*.app/
+.env
+.env.*
+*.p12
+*.mobileprovision
+__pycache__/
+*.pyc
