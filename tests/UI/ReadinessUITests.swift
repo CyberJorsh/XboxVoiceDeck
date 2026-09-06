@@ -69,6 +69,16 @@ final class ReadinessUITests: XCTestCase {
         waitText("routing.status", contains: "STOPPED")
     }
 
+    func testClosingWindowQuitsAndRelaunchStartsStopped() {
+        launch(); start()
+        app.typeKey("w", modifierFlags: .command)
+        XCTAssertTrue(app.wait(for: .notRunning, timeout: 5))
+        app.launch()
+        XCTAssertTrue(app.windows["Xbox Voice Deck"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["simulation.banner"].exists)
+        XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
+    }
+
     func testToneRequiresReviewAndConfirmationThenBypassCancels() {
         launch(); start(); tab("Calibration")
         let confirm = app.buttons["calibration.confirmTone"]
@@ -76,11 +86,13 @@ final class ReadinessUITests: XCTestCase {
         toggle("calibration.review").click()
         toggle("calibration.mute").click()
         visible(confirm); XCTAssertTrue(confirm.isEnabled); confirm.click()
-        XCTAssertTrue(app.buttons["Play for up to 2 seconds"].waitForExistence(timeout: 3))
-        app.buttons["Cancel"].click()
+        let dialog = app.windows["Xbox Voice Deck"].sheets.firstMatch
+        XCTAssertTrue(dialog.waitForExistence(timeout: 3))
+        dialog.buttons["Cancel"].click()
         XCTAssertFalse(app.buttons["calibration.stopTone"].isEnabled)
         confirm.click()
-        app.buttons["Play for up to 2 seconds"].click()
+        dialog.buttons["Play for up to 2 seconds"].click()
+        XCTAssertTrue(app.buttons["calibration.stopTone"].isEnabled)
         app.buttons["routing.bypass"].click()
         XCTAssertFalse(app.buttons["calibration.stopTone"].isEnabled)
         XCTAssertFalse(confirm.isEnabled, "Tone cancellation must leave Xbox muted")

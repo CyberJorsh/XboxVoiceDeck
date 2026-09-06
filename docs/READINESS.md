@@ -27,6 +27,8 @@ bash scripts/ui_test.sh    # Native UI tests using Debug-only simulated services
 
 The UI suite requires a logged-in macOS GUI session with Xcode UI automation available. An automation initialization failure is not a pass. Fixtures are explicitly labelled SIMULATED, have isolated preferences, and open no Core Audio devices. The fixture entry point is excluded from Release builds. Actual permission dialogs, drivers and microphone capture still require hardware acceptance.
 
+The app has one control window. Closing it quits the app and invokes synchronous routing shutdown; reopening the app starts stopped with safe defaults. Use **File → Show Xbox Voice Deck** to bring the existing window forward.
+
 ## Use the app's Preflight tab
 
 1. In Routing, select the exact four endpoints and channels. Do not substitute defaults for a missing saved device.
