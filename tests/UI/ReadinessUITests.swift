@@ -23,11 +23,16 @@ final class ReadinessUITests: XCTestCase {
         if radio.exists { radio.click() } else { app.buttons[name].click() }
     }
     private func visible(_ element: XCUIElement) {
-        for _ in 0..<8 {
-            if element.isHittable { return }
-            app.scrollViews.firstMatch.scroll(byDeltaX: 0, deltaY: -300)
+        let scroll = app.scrollViews.firstMatch
+        for _ in 0..<12 {
+            let bounds = scroll.frame.insetBy(dx: 4, dy: 4)
+            let frame = element.frame
+            // macOS XCTest can call a clipped control hittable but click below
+            // its scroll view. Require the whole target to be visible.
+            if !frame.isEmpty && bounds.contains(frame) && element.isHittable { return }
+            scroll.scroll(byDeltaX: 0, deltaY: frame.minY < bounds.minY ? 150 : -150)
         }
-        XCTAssertTrue(element.isHittable, "Expected visible control: \(element)")
+        XCTFail("Expected control fully inside the scroll view: \(element)")
     }
     private func waitText(_ id: String, contains value: String) {
         let condition = NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", value, value)
