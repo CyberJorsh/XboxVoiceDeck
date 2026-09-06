@@ -44,6 +44,15 @@ jobs:
       - name: Run silent software safety diagnostic
         run: bash scripts/safety_check.sh
 
+      - name: Check preparation probe arguments
+        run: |
+          bash scripts/routing_probe.sh --self-test
+          bash scripts/device_probe.sh --help
+
+      - name: Run native UI fixtures without audio hardware
+        timeout-minutes: 5
+        run: bash scripts/ui_test.sh
+
       - name: Retain test reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

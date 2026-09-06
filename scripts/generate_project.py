@@ -20,8 +20,9 @@ def refs(items):
     return '(' + ', '.join(items) + (',' if items else '') + ')'
 
 app_sources = sorted(str(p.relative_to(root)) for p in (root/'XboxVoiceDeck').rglob('*') if p.suffix in ['.swift', '.c'])
-test_sources = ['tests/DeckTests.swift', 'XboxVoiceDeck/Audio/Realtime/DeckAudio.c', 'XboxVoiceDeck/Audio/Devices/AudioDeviceManager.swift', 'XboxVoiceDeck/Models/RoutingConfiguration.swift', 'XboxVoiceDeck/Settings/CalibrationStore.swift', 'XboxVoiceDeck/Audio/Diagnostics/OfflineSafetyCheck.swift', 'XboxVoiceDeck/Audio/Routing/RoutingStartGate.swift']
-all_paths = sorted(set(app_sources + test_sources + ['XboxVoiceDeck/Audio/Realtime/DeckAudio.h', 'XboxVoiceDeck/Support/BridgingHeader.h', 'XboxVoiceDeck/Support/Info.plist', 'XboxVoiceDeck/Support/XboxVoiceDeck.entitlements']))
+test_sources = sorted(str(p.relative_to(root)) for p in (root/'tests').glob('*.swift')) + [p for p in app_sources if not p.endswith('/XboxVoiceDeckApp.swift')]
+ui_sources = sorted(str(p.relative_to(root)) for p in (root/'tests'/'UI').glob('*.swift'))
+all_paths = sorted(set(app_sources + test_sources + ui_sources + ['XboxVoiceDeck/Audio/Realtime/DeckAudio.h', 'XboxVoiceDeck/Support/BridgingHeader.h', 'XboxVoiceDeck/Support/Info.plist', 'XboxVoiceDeck/Support/XboxVoiceDeck.entitlements']))
 file_refs = {}
 for path in all_paths:
     kind = {'.swift':'sourcecode.swift','.c':'sourcecode.c.c','.h':'sourcecode.c.h','.plist':'text.plist.xml','.entitlements':'text.plist.entitlements'}[Path(path).suffix]
@@ -42,12 +43,15 @@ def configuration_list(key, extra):
     for name in ['Debug','Release']:
         settings = dict(common)
         settings.update({'SWIFT_OPTIMIZATION_LEVEL':'-Onone' if name=='Debug' else '-O','GCC_OPTIMIZATION_LEVEL':'0' if name=='Debug' else '3','DEBUG_INFORMATION_FORMAT':'dwarf-with-dsym','ENABLE_TESTABILITY':'YES' if name=='Debug' else 'NO'})
+        settings['SWIFT_ACTIVE_COMPILATION_CONDITIONS'] = 'DEBUG' if name == 'Debug' else ''
         settings.update(extra)
         body=' '.join(f'{k} = {q(v)};' for k,v in settings.items())
         configs.append(obj(key+name, f'isa = XCBuildConfiguration; buildSettings = {{ {body} }}; name = {name};'))
     return obj(key+'configlist', f'isa = XCConfigurationList; buildConfigurations = {refs(configs)}; defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
 
-for name, paths, is_test in [('XboxVoiceDeck',app_sources,False),('XboxVoiceDeckTests',test_sources,True)]:
+for name, paths, kind in [('XboxVoiceDeck',app_sources,'application'),('XboxVoiceDeckTests',test_sources,'bundle.unit-test'),('XboxVoiceDeckUITests',ui_sources,'bundle.ui-testing')]:
+    is_test = kind != 'application'
+    is_ui = kind == 'bundle.ui-testing'
     builds=[obj(name+':build:'+p, f'isa = PBXBuildFile; fileRef = {file_refs[p]};') for p in paths]
     sources=obj(name+':sources',f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {refs(builds)}; runOnlyForDeploymentPostprocessing = 0;')
     frameworks=[]
@@ -62,8 +66,14 @@ for name, paths, is_test in [('XboxVoiceDeck',app_sources,False),('XboxVoiceDeck
         extra.update({'GENERATE_INFOPLIST_FILE':'YES','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks','ENABLE_HARDENED_RUNTIME':'NO'})
     else:
         extra.update({'INFOPLIST_FILE':'XboxVoiceDeck/Support/Info.plist','CODE_SIGN_ENTITLEMENTS':'XboxVoiceDeck/Support/XboxVoiceDeck.entitlements','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/../Frameworks'})
+    if is_ui:
+        extra.update({'TEST_TARGET_NAME':'XboxVoiceDeck', 'SWIFT_OBJC_BRIDGING_HEADER':''})
+    dependencies = []
+    if is_ui:
+        proxy = obj(name+':proxy', f'isa = PBXContainerItemProxy; containerPortal = {ident("project")}; proxyType = 1; remoteGlobalIDString = {target_ids[0]}; remoteInfo = XboxVoiceDeck;')
+        dependencies.append(obj(name+':dependency', f'isa = PBXTargetDependency; target = {target_ids[0]}; targetProxy = {proxy};'))
     cl=configuration_list(name,extra)
-    target_ids.append(obj(name+':target',f'isa = PBXNativeTarget; buildConfigurationList = {cl}; buildPhases = {refs([sources,fp])}; buildRules = (); dependencies = (); name = {name}; productName = {name}; productReference = {product}; productType = "com.apple.product-type.{"bundle.unit-test" if is_test else "application"}";'))
+    target_ids.append(obj(name+':target',f'isa = PBXNativeTarget; buildConfigurationList = {cl}; buildPhases = {refs([sources,fp])}; buildRules = (); dependencies = {refs(dependencies)}; name = {name}; productName = {name}; productReference = {product}; productType = "com.apple.product-type.{kind}";'))
 pg=obj('products',f'isa = PBXGroup; children = {refs(products)}; name = Products; sourceTree = "<group>";')
 group=obj('main',f'isa = PBXGroup; children = {refs(list(file_refs.values())+[pg])}; sourceTree = "<group>";')
 cl=configuration_list('project',{})
@@ -78,10 +88,11 @@ def buildref(index,name,product):
     return f'<BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{target_ids[index]}" BuildableName="{product}" BlueprintName="{name}" ReferencedContainer="container:XboxVoiceDeck.xcodeproj"/>'
 a=buildref(0,'XboxVoiceDeck','XboxVoiceDeck.app')
 t=buildref(1,'XboxVoiceDeckTests','XboxVoiceDeckTests.xctest')
+u=buildref(2,'XboxVoiceDeckUITests','XboxVoiceDeckUITests.xctest')
 scheme.write_text(f'''<?xml version="1.0" encoding="UTF-8"?>
 <Scheme LastUpgradeVersion="2700" version="1.7">
 <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES"><BuildActionEntries><BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">{a}</BuildActionEntry></BuildActionEntries></BuildAction>
-<TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO">{t}</TestableReference></Testables></TestAction>
+<TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES"><Testables><TestableReference skipped="NO">{t}</TestableReference><TestableReference skipped="NO">{u}</TestableReference></Testables></TestAction>
 <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" allowLocationSimulation="NO"><BuildableProductRunnable runnableDebuggingMode="0">{a}</BuildableProductRunnable></LaunchAction>
 <ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES"><BuildableProductRunnable runnableDebuggingMode="0">{a}</BuildableProductRunnable></ProfileAction>
 <AnalyzeAction buildConfiguration="Debug"/><ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES"/>

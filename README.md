@@ -16,6 +16,7 @@ A native Swift/SwiftUI macOS wired audio bridge for the HyperX Cloud III boom mi
 * Actual raw mic, Xbox input (including L/R), Xbox output and headphone output meters with held peaks/clip counts, queue fill, drift correction, underrun/overrun/drop/resync counters.
 * Bypass restores normal unity microphone input gain and preserves safe output gain. It cancels any calibration tone and latches Xbox mute; otherwise existing mutes are preserved. Cmd-Shift-B is **app-local**, not a global hotkey.
 * Dedicated calibration screen with 1 dB steps, limiter telemetry, confirmed two-second tone, reviewed device-specific profiles and a silent hardware-free safety check. See [CALIBRATION.md](docs/CALIBRATION.md).
+* Guided Preflight with endpoint/buffer/permission checks, a staged physical checklist and timestamped local JSON readiness reports. See [READINESS.md](docs/READINESS.md).
 * Visible startup/callback errors, microphone permission handling, device/jack/rate/buffer invalidation with safe stop and explicit restart, copied diagnostics and local OSLog events. No microphone recordings.
 
 Read [Audio architecture](docs/AUDIO_ARCHITECTURE.md) for the decision made before implementation, alternatives, callback ownership, synchronization, drift strategy and limitations. Apple's [AUHAL technical note](https://developer.apple.com/library/archive/technotes/tn2091/_index.html) is the principal API reference.
@@ -53,7 +54,7 @@ USB adapter → Mac USB-C
 
 **The Xbox controller expects headset microphone-level audio. Depending on the USB audio adapter, an inline attenuator may be required. Software volume reduction does not guarantee electrical compatibility.** The controller headphone output can also overload a USB **mic** input. Read the full [wiring, CTIA pinout, mono/stereo and level guidance](docs/HARDWARE_SETUP.md) before connecting the output path.
 
-Select all four endpoints and actual input channels. A device labelled “MacBook microphone” is not proof that the HyperX boom mic is selected. Start muted, verify the two input meters independently, unmute headphones cautiously, then check outgoing microphone levels starting at −60 dB. The Calibration tab provides a confirmed low-level tone and reviewed profile restoration. A hardware setup wizard remains deferred. Without devices, use its silent software safety check or `bash scripts/safety_check.sh`.
+Select all four endpoints and actual input channels. A device labelled “MacBook microphone” is not proof that the HyperX boom mic is selected. The Preflight tab checks software configuration and guides physical observations. Start muted, verify the two input meters independently, unmute headphones cautiously, then check outgoing microphone levels starting at −60 dB. The Calibration tab provides a confirmed low-level tone and reviewed profile restoration. Without devices, use the silent software safety check or `bash scripts/readiness_check.sh` for a Release build and preparation checks.
 
 The first valid start requests macOS microphone permission once. If denied, use **System Settings → Privacy & Security → Microphone → Xbox Voice Deck**. The app includes an explanatory button and does not repeatedly prompt. Both the headset capture and USB capture need permission. Rebuilding with a changed signing identity can require macOS permission approval again.
 
@@ -61,6 +62,7 @@ The first valid start requests macOS microphone permission once. If denied, use 
 
 ```sh
 bash scripts/test.sh
+bash scripts/ui_test.sh       # Native controls with clearly labelled simulated services
 bash scripts/safety_check.sh   # Silent: no audio devices opened
 bash scripts/device_probe.sh
 # Optional: zero-sample output-component test, with an explicitly enumerated ID:
@@ -69,7 +71,9 @@ bash scripts/device_probe.sh --silent-output 71
 
 Device IDs are volatile; **replace 71 with the current output ID**, do not reuse it blindly. The silent probe creates and starts one AUHAL output, checks 200 callbacks, and never captures a microphone or plays an audible signal. It does not validate input capture, physical cabling or Xbox reception.
 
-`scripts/test.sh` runs XCTest, seven simulated two-minute clock/rate/buffer cases, concurrent ring stress, and Address/UndefinedBehavior/Thread sanitizer stress. The tests cover Phase 1 routing and Phase 2 limiter/tone/profile safety. Soundboard, voice-preset and global-hotkey tests belong to their implementation phases.
+`scripts/test.sh` runs XCTest including the actual app-model lifecycle and preflight/report logic, ten healthy clock/rate/buffer schedules, two deliberate fault/recovery schedules, concurrent ring stress, and Address/UndefinedBehavior/Thread sanitizer stress. See [CLOCK_TESTS.md](docs/CLOCK_TESTS.md) for durations and thresholds. `scripts/ui_test.sh` exercises native controls through Debug-only fixtures; these tests open no audio devices. Soundboard, voice-preset and global-hotkey tests belong to their implementation phases.
+
+The [four-endpoint probe](docs/ROUTING_PROBE.md) validates an explicit configuration and can run a bounded, muted session through the actual engine when enough devices and capture permission are available. It exports counters rather than audio and never substitutes a default device.
 
 Test results are generated under `build/tests/`. Local `build/` and `artifacts/` directories are intentionally excluded from Git; machine logs and device snapshots are not published. See [VALIDATION.md](docs/VALIDATION.md) for the recorded first-pass results and outstanding gates. **Copy diagnostics** includes device/runtime statistics but no recorded microphone content, machine serial number or hardware UUID. OSLog events can be read with:
 

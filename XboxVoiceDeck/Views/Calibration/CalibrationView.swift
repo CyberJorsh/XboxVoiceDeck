@@ -25,6 +25,7 @@ struct CalibrationView: View {
                             get: { model.calibrationReviewed },
                             set: { model.reviewedContext = $0 ? model.calibrationContext : nil }))
                             .disabled(model.calibrationContext == nil || model.toneBusy)
+                            .accessibilityIdentifier("calibration.review")
                         Text("This acknowledgement is not electrical certification. Device/channel/format changes require a new review.").font(.caption).foregroundStyle(.secondary)
                     }.padding(6)
                 }
@@ -38,6 +39,7 @@ struct CalibrationView: View {
                                 .disabled(!model.running || model.busy || model.toneBusy)
                             Toggle("Mute Xbox mic", isOn: $model.xboxMuted).toggleStyle(.switch)
                                 .disabled(!model.running || model.busy || model.toneBusy)
+                                .accessibilityIdentifier("calibration.mute")
                         }
                         Text("Start muted. When the electrical setup is suitable, explicitly unmute and speak normally. Adjust by 1 dB while checking the Xbox's own microphone test. No automatic gain increase is performed.").font(.caption)
                         Text("Input peak: \(db(model.snapshot.outgoing.inputPeak)) · input clipping samples: \(model.snapshot.outgoing.inputClips)")
@@ -55,7 +57,8 @@ struct CalibrationView: View {
                                 toneContext = model.calibrationContext
                                 showToneConfirmation = true
                             }.disabled(!model.running || model.busy || model.xboxMuted || !model.calibrationReviewed || model.toneBusy)
-                            Button("Stop tone & mute") { model.cancelTone() }.disabled(!model.toneBusy)
+                            .accessibilityIdentifier("calibration.confirmTone")
+                            Button("Stop tone & mute") { model.cancelTone() }.disabled(!model.toneBusy).accessibilityIdentifier("calibration.stopTone")
                             if model.toneBusy { Text("Tone active / starting").foregroundStyle(.orange) }
                         }
                         Text("Requires active routing, a reviewed setup and an explicitly unmuted Xbox output. Leaving this page or switching away from the app cancels the tone. A quiet tone does not prove compatibility.").font(.caption).foregroundStyle(.secondary)
@@ -64,9 +67,10 @@ struct CalibrationView: View {
                 GroupBox("4 · Save or review levels") {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
-                            TextField("Profile name", text: $profileName)
+                            TextField("Profile name", text: $profileName).accessibilityIdentifier("calibration.profileName")
                             Button("Save pending profile") { model.saveProfile(name: profileName) }
                                 .disabled(!model.running || model.busy || model.toneBusy)
+                                .accessibilityIdentifier("calibration.saveProfile")
                         }
                         Text("Profiles store the exact device UIDs, channels, formats and levels locally. They never load automatically, unmute outputs or assert that physical calibration passed.").font(.caption)
                         ForEach(model.profiles) { profile in
@@ -79,10 +83,12 @@ struct CalibrationView: View {
                                 Spacer()
                                 Button("Restore muted") { model.restoreProfile(profile) }
                                     .disabled(!model.running || model.busy || model.toneBusy || !model.calibrationReviewed || profile.context != model.calibrationContext)
+                                    .accessibilityIdentifier("calibration.restoreProfile")
                                 Button("Delete") { model.deleteProfile(profile) }.disabled(model.toneBusy)
                             }
                         }
                         Text(model.calibrationMessage).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                            .accessibilityIdentifier("calibration.message")
                     }.padding(6)
                 }
                 GroupBox("Without hardware · Silent software check") {
@@ -90,9 +96,11 @@ struct CalibrationView: View {
                         Text("Exercise the actual limiter, tone, mute, bypass and isolated route buffers using synthetic samples. This opens no audio devices and plays no sound.")
                         Button(model.offlineBusy ? "Checking…" : "Run software safety check") { model.runOfflineCheck() }
                             .disabled(model.offlineBusy || model.running || model.busy)
+                            .accessibilityIdentifier("calibration.offlineCheck")
                         if let result = model.offlineResult {
                             Text(result.summary).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                                 .foregroundStyle(result.passed ? Color.primary : Color.red)
+                                .accessibilityIdentifier("calibration.offlineResult")
                         }
                     }.padding(6)
                 }

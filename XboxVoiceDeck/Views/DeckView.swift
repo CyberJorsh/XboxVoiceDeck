@@ -12,18 +12,24 @@ struct DeckView: View {
                 Spacer()
                 Button(model.running ? "Stop routing" : "Start muted") { model.running ? model.stop() : model.start() }
                     .disabled(model.busy).keyboardShortcut(.return, modifiers: .command)
+                    .accessibilityIdentifier("routing.startStop")
             }
-            Text(model.status).font(.callout.monospaced()).textSelection(.enabled)
+            if model.isSimulated {
+                Text("SIMULATED UI TEST · No audio devices opened · Hardware unverified")
+                    .font(.headline).foregroundStyle(.orange).accessibilityIdentifier("simulation.banner")
+            }
+            Text(model.status).font(.callout.monospaced()).textSelection(.enabled).accessibilityIdentifier("routing.status")
             if let error = model.error {
                 HStack(alignment: .top) {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Text(error).textSelection(.enabled)
+                    Text(error).textSelection(.enabled).accessibilityIdentifier("routing.error")
                     Spacer()
                     Button("Microphone settings") { model.openMicrophoneSettings() }
                 }.padding(10).background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
             }
             TabView {
                 routing.tabItem { Label("Routing", systemImage: "cable.connector") }
+                PreflightView(model: model).tabItem { Label("Preflight", systemImage: "checklist") }
                 levels.tabItem { Label("Meters & safety", systemImage: "waveform") }
                 CalibrationView(model: model).tabItem { Label("Calibration", systemImage: "slider.horizontal.3") }
                 diagnostics.tabItem { Label("Diagnostics", systemImage: "stethoscope") }
@@ -32,6 +38,7 @@ struct DeckView: View {
                 Text("Xbox incoming → headphones only. Mic → Xbox only. Sidetone off.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("BYPASS ALL") { model.bypass() }.keyboardShortcut("b", modifiers: [.command, .shift])
+                    .accessibilityIdentifier("routing.bypass")
                     .help("Restore unity microphone input gain. Cancel any tone and mute its output. Preserve safe gains. There are no effects or clips. This shortcut is app-local.")
             }
         }.padding(20).frame(minWidth: 820, minHeight: 720)
@@ -92,6 +99,7 @@ struct DeckView: View {
                     Text("\(device.name) [\(device.id)]\(device.supported ? "" : " — unsupported / disconnected")").tag(device.uid)
                 }
             }
+            .accessibilityIdentifier(title)
             if let device = model.devices.first(where: { $0.uid == selection.wrappedValue }) {
                 Text(device.summary).font(.caption.monospaced()).foregroundStyle(.secondary)
             }
@@ -162,8 +170,8 @@ struct DeckView: View {
     }
     private var diagnostics: some View {
         VStack(alignment: .leading) {
-            HStack { Button("Copy diagnostics") { model.copyDiagnostics() }; Spacer(); Text("No microphone recordings or content").foregroundStyle(.secondary) }
-            ScrollView { Text(model.diagnostics).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+            HStack { Button("Copy diagnostics") { model.copyDiagnostics() }.accessibilityIdentifier("diagnostics.copy"); Spacer(); Text("No microphone recordings or content").foregroundStyle(.secondary) }
+            ScrollView { Text(model.diagnostics).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).accessibilityIdentifier("diagnostics.text") }
         }.padding()
     }
 }

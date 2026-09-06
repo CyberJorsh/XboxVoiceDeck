@@ -93,7 +93,7 @@ extension Logger {
 
 // All mutable state is private and confined to queue. Public methods enqueue
 // work; the sole synchronous entry is the application-termination barrier.
-final class AudioRoutingEngine: @unchecked Sendable {
+final class AudioRoutingEngine: DeckRoutingEngine, @unchecked Sendable {
     private let queue = DispatchQueue(label: "XboxVoiceDeck.audio-control", qos: .userInitiated)
     private var session: RoutingSession?
     private var originalBuffers: [(device: AudioEndpoint, requested: UInt32)] = []

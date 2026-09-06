@@ -31,6 +31,7 @@ struct DeckRoute {
     _Atomic float inputRMS, inputPeak, outputRMS, outputPeak, inputLeft, inputRight;
     _Atomic uint64_t inputClips, outputClips, limitedSamples;
     _Atomic uint64_t underruns, overruns, droppedFrames, resyncs;
+    _Atomic uint64_t primingDroppedFrames;
     _Atomic uint64_t inputCallbacks, outputCallbacks;
     _Atomic uint32_t buffered;
     _Atomic double ppm;
@@ -196,7 +197,12 @@ void DeckRoutePull(DeckRoute *r, float *left, float *right, uint32_t frames) {
     STORE(r->outputRMS, 0);
     if (!r->primed) {
         if (available < r->target) return;
-        if (available > r->target) ADD(r->droppedFrames, available - r->target);
+        if (available > r->target) {
+            ADD(r->primingDroppedFrames, available - r->target);
+            // Publish priming classification before the total. Snapshot's
+            // acquire read cannot report new total drops with old classification.
+            atomic_fetch_add_explicit(&r->droppedFrames, available - r->target, memory_order_release);
+        }
         rd = w - r->target;
         available = r->target;
         r->fraction = r->integral = r->filteredError = r->correction = 0;
@@ -308,7 +314,10 @@ DeckSnapshot DeckRouteSnapshot(DeckRoute *r) {
 #define SNAP(field) s.field = LOAD(r->field)
     SNAP(inputRMS); SNAP(inputPeak); SNAP(outputRMS); SNAP(outputPeak);
     SNAP(inputLeft); SNAP(inputRight); SNAP(inputClips); SNAP(outputClips); SNAP(limitedSamples);
-    SNAP(underruns); SNAP(overruns); SNAP(droppedFrames); SNAP(resyncs);
+    SNAP(underruns); SNAP(overruns);
+    s.droppedFrames = atomic_load_explicit(&r->droppedFrames, memory_order_acquire);
+    SNAP(resyncs);
+    SNAP(primingDroppedFrames);
     SNAP(inputCallbacks); SNAP(outputCallbacks);
     SNAP(limiterReductionDB); SNAP(limiterFrames); SNAP(toneFrames); SNAP(toneFramesRemaining);
 #undef SNAP
