@@ -66,6 +66,213 @@ static void simulate(double inputRate, double outputRate, double ppm, unsigned i
     DeckRouteDestroy(r);
 }
 
+// Local PRNG state makes every schedule repeatable and keeps capture and render
+// jitter independent. Jitter is an absolute timestamp offset, not accumulated
+// interval error that would accidentally introduce an unbounded clock walk.
+static uint32_t randomNext(uint32_t *state) {
+    uint32_t value = *state;
+    value ^= value << 13;
+    value ^= value >> 17;
+    value ^= value << 5;
+    return *state = value;
+}
+
+static double timestampJitter(uint32_t *state) {
+    return ((double)(randomNext(state) & 0xffff) / 65535 - 0.5) * 0.00015;
+}
+
+static unsigned variableBlock(uint32_t *state) {
+    static const unsigned sizes[] = {32, 64, 128, 256};
+    return sizes[randomNext(state) % 4];
+}
+
+static double changingDrift(double time) {
+    if (time < 40) return 600;
+    if (time < 60) return 600 - (time - 40) * 60;
+    if (time < 90) return -600;
+    return 350;
+}
+
+static void checkOutput(const float *left, const float *right, unsigned frames, float ceiling) {
+    for (unsigned i = 0; i < frames; ++i) {
+        assert(isfinite(left[i]) && fabsf(left[i]) <= ceiling);
+        if (right) assert(isfinite(right[i]) && fabsf(right[i]) <= ceiling);
+    }
+}
+
+static void variableSchedule(double inputRate, double outputRate, double duration, uint32_t seed) {
+    DeckRoute *route = DeckRouteCreate(inputRate, outputRate, 256, 256, 2, false);
+    assert(route);
+    DeckRouteSetGain(route, 1, 0, false);
+    uint32_t inputRandom = seed, outputRandom = seed ^ UINT32_C(0x9e3779b9);
+    unsigned inputBlock = variableBlock(&inputRandom), outputBlock = variableBlock(&outputRandom);
+    unsigned inputSizes = 0, outputSizes = 0, maxFill = 0;
+    double inputTime = 0, outputTime = 0.0007;
+    double nextInput = inputTime + timestampJitter(&inputRandom);
+    double nextOutput = outputTime + timestampJitter(&outputRandom);
+    double phase = 0, energy = 0, correctionIntegral = 0, measuredSeconds = 0, fillIntegral = 0;
+    double earlyFillIntegral = 0, earlySeconds = 0;
+    double positiveCorrection = 0, positiveSeconds = 0, negativeCorrection = 0, negativeSeconds = 0;
+    uint64_t measured = 0, crossings = 0, stableDropped = 0;
+    bool baselineCaptured = false;
+    float left[256], right[256] = {0}, outLeft[256], outRight[256], previous = 0;
+    while (outputTime < duration) {
+        if (nextInput <= nextOutput) {
+            double actualRate = inputRate * (1 + changingDrift(inputTime) / 1000000);
+            for (unsigned i = 0; i < inputBlock; ++i) {
+                left[i] = (float)(0.2 * sin(phase));
+                phase += 2 * M_PI * 1000 / actualRate;
+                if (phase >= 2 * M_PI) phase -= 2 * M_PI;
+            }
+            DeckRoutePush(route, left, right, inputBlock);
+            inputSizes |= inputBlock;
+            inputTime += inputBlock / actualRate;
+            inputBlock = variableBlock(&inputRandom);
+            nextInput = inputTime + timestampJitter(&inputRandom);
+        } else {
+            DeckRoutePull(route, outLeft, outRight, outputBlock);
+            checkOutput(outLeft, outRight, outputBlock, 0.95f);
+            DeckSnapshot snapshot = DeckRouteSnapshot(route);
+            assert(snapshot.underruns == 0 && snapshot.overruns == 0 && snapshot.resyncs == 0);
+            assert(snapshot.bufferedFrames <= snapshot.targetFrames * 2);
+            assert(fabs(snapshot.correctionPPM) <= 2000);
+            if (snapshot.bufferedFrames > maxFill) maxFill = snapshot.bufferedFrames;
+            // Initial priming may discard a partial block. Healthy clock tracking
+            // must not discard additional frames after that initial alignment.
+            if (outputTime > 1 && !baselineCaptured) {
+                stableDropped = snapshot.droppedFrames;
+                baselineCaptured = true;
+            }
+            if (baselineCaptured) assert(snapshot.droppedFrames == stableDropped);
+            double dt = outputBlock / outputRate;
+            if (outputTime > duration - 60) {
+                correctionIntegral += snapshot.correctionPPM * dt;
+                fillIntegral += snapshot.bufferedFrames * dt;
+                measuredSeconds += dt;
+                for (unsigned i = 0; i < outputBlock; ++i) {
+                    energy += outLeft[i] * outLeft[i];
+                    assert(outRight[i] == 0);
+                    if (previous <= 0 && outLeft[i] > 0) ++crossings;
+                    previous = outLeft[i];
+                    ++measured;
+                }
+            }
+            if (duration > 180 && outputTime >= 120 && outputTime < 180) {
+                earlyFillIntegral += snapshot.bufferedFrames * dt;
+                earlySeconds += dt;
+            }
+            if (outputTime >= 30 && outputTime < 40) {
+                positiveCorrection += snapshot.correctionPPM * dt;
+                positiveSeconds += dt;
+            }
+            if (outputTime >= 75 && outputTime < 90) {
+                negativeCorrection += snapshot.correctionPPM * dt;
+                negativeSeconds += dt;
+            }
+            outputSizes |= outputBlock;
+            outputTime += dt;
+            outputBlock = variableBlock(&outputRandom);
+            nextOutput = outputTime + timestampJitter(&outputRandom);
+        }
+    }
+    DeckSnapshot snapshot = DeckRouteSnapshot(route);
+    double correction = correctionIntegral / measuredSeconds;
+    double meanFill = fillIntegral / measuredSeconds;
+    double rms = sqrt(energy / measured), frequency = crossings / (measured / outputRate);
+    printf("Variable %.0f -> %.0f Hz, %.0fs, seed %08x: drift +600 -> -600 -> +350 ppm, final-minute correction %+.2f ppm, mean queue %.1f/%u max %u, RMS %.5f, frequency %.3f Hz\n",
+        inputRate, outputRate, duration, seed, correction, meanFill, snapshot.targetFrames, maxFill, rms, frequency);
+    fflush(stdout);
+    assert(inputSizes == (32 | 64 | 128 | 256) && outputSizes == inputSizes);
+    assert(measuredSeconds > 59 && fabs(correction - 350) < 40);
+    assert(fabs(meanFill - snapshot.targetFrames) < snapshot.targetFrames * 0.10);
+    assert(fabs(rms - 0.2 / sqrt(2)) < 0.003 && fabs(frequency - 1000) < 0.15);
+    assert(positiveSeconds > 9 && negativeSeconds > 14);
+    assert(positiveCorrection / positiveSeconds > 300 && negativeCorrection / negativeSeconds < -300);
+    printf("  Steady segment mean correction: %+.2f -> %+.2f ppm.\n",
+        positiveCorrection / positiveSeconds, negativeCorrection / negativeSeconds);
+    // The long session must settle at the same occupancy as its early settled
+    // minute, rather than merely avoiding an overflow while latency grows.
+    if (duration > 180) {
+        assert(earlySeconds > 59);
+        assert(fabs(meanFill - earlyFillIntegral / earlySeconds) < snapshot.targetFrames * 0.10);
+        printf("  Early/final settled queue: %.1f/%.1f frames.\n", earlyFillIntegral / earlySeconds, meanFill);
+    }
+    DeckRouteDestroy(route);
+}
+
+static void recovery(bool overflow) {
+    DeckRoute *route = DeckRouteCreate(48000, 48000, 128, 128, 1, true);
+    assert(route);
+    DeckRouteSetGain(route, 1, -60, false);
+    float input[128], output[128];
+    for (unsigned i = 0; i < 128; ++i) input[i] = 0.2f;
+    for (unsigned block = 0; block < 1875; ++block) {
+        DeckRoutePush(route, input, NULL, 128);
+        DeckRoutePull(route, output, NULL, 128);
+    }
+    DeckSnapshot before = DeckRouteSnapshot(route);
+    assert(before.underruns == 0 && before.overruns == 0 && before.resyncs == 0);
+    assert(DeckRouteStartTone(route));
+    if (overflow) {
+        // Render callback stall: 256 capture blocks exceed this route's finite
+        // ring capacity. This is an intentional fault, not a healthy-clock run.
+        for (unsigned block = 0; block < 256; ++block) DeckRoutePush(route, input, NULL, 128);
+        DeckRoutePull(route, output, NULL, 128);
+        checkOutput(output, NULL, 128, 0.000951f);
+    } else {
+        // Capture callback stall: 64 renders drain the queue, then wait for
+        // priming instead of counting the same starvation on every callback.
+        for (unsigned block = 0; block < 64; ++block) {
+            DeckRoutePull(route, output, NULL, 128);
+            checkOutput(output, NULL, 128, 0.000951f);
+        }
+    }
+    DeckSnapshot fault = DeckRouteSnapshot(route);
+    assert(fault.resyncs == before.resyncs + 1);
+    assert(fault.droppedFrames > before.droppedFrames);
+    assert(fault.muted && !fault.toneActive && fault.toneFramesRemaining == 0);
+    if (overflow) assert(fault.overruns > 0 && fault.underruns == 0);
+    else assert(fault.underruns == 1 && fault.overruns == 0);
+
+    unsigned recoveryBlock = 0;
+    for (; recoveryBlock < 64; ++recoveryBlock) {
+        DeckRoutePush(route, input, NULL, 128);
+        DeckRoutePull(route, output, NULL, 128);
+        for (unsigned i = 0; i < 128; ++i) assert(output[i] == 0);
+        // Unmute is an explicit control action after the fault, never automatic.
+        DeckRouteSetMuted(route, false);
+        DeckRoutePush(route, input, NULL, 128);
+        DeckRoutePull(route, output, NULL, 128);
+        if (DeckRouteSnapshot(route).outputRMS > 0) break;
+        DeckRouteSetMuted(route, true);
+    }
+    assert(recoveryBlock < 8); // Re-priming within 16 callbacks, under 43 ms.
+    uint64_t settledDrops = DeckRouteSnapshot(route).droppedFrames;
+    double correctionSum = 0, fillSum = 0;
+    unsigned settledCount = 0, maxFill = 0;
+    for (unsigned block = 0; block < 33750; ++block) { // 90 simulated seconds.
+        DeckRoutePush(route, input, NULL, 128);
+        DeckRoutePull(route, output, NULL, 128);
+        checkOutput(output, NULL, 128, 0.000951f);
+        DeckSnapshot current = DeckRouteSnapshot(route);
+        assert(current.underruns == fault.underruns && current.overruns == fault.overruns && current.resyncs == fault.resyncs);
+        assert(current.droppedFrames == settledDrops);
+        assert(current.bufferedFrames <= current.targetFrames * 2);
+        if (current.bufferedFrames > maxFill) maxFill = current.bufferedFrames;
+        if (block >= 22500) { correctionSum += current.correctionPPM; fillSum += current.bufferedFrames; ++settledCount; }
+    }
+    DeckSnapshot final = DeckRouteSnapshot(route);
+    assert(settledCount == 11250 && fabs(correctionSum / settledCount) < 40);
+    assert(fabs(fillSum / settledCount - final.targetFrames) < final.targetFrames * 0.10);
+    assert(final.outputRMS > 0.00019f && !final.muted && !final.toneActive);
+    printf("Forced %s: under/over/resync %llu/%llu/%llu, dropped %llu, recovery <= %u callbacks, final 30s correction %+.2f ppm, mean queue %.1f/%u max %u; no subsequent faults.\n",
+        overflow ? "render stall and capture burst" : "capture pause", (unsigned long long)final.underruns,
+        (unsigned long long)final.overruns, (unsigned long long)final.resyncs, (unsigned long long)final.droppedFrames,
+        (recoveryBlock + 1) * 2, correctionSum / settledCount, fillSum / settledCount, final.targetFrames, maxFill);
+    fflush(stdout);
+    DeckRouteDestroy(route);
+}
+
 typedef struct { DeckRoute *route; _Atomic bool done; } ThreadContext;
 static void *producer(void *arg) {
     ThreadContext *context = arg;
@@ -165,8 +372,13 @@ int main(int argc, char **argv) {
     simulate(48000, 44100, -800, 256, 128);
     simulate(44100, 44100, 1000, 32, 64);
     simulate(48000, 48000, -1000, 512, 512);
+    variableSchedule(48000, 48000, 180, UINT32_C(0x58424431));
+    variableSchedule(44100, 48000, 180, UINT32_C(0x58424432));
+    variableSchedule(48000, 44100, 600, UINT32_C(0x58424433));
+    recovery(false);
+    recovery(true);
     concurrency();
     cancellationIsolation();
-    puts("All clock, format, fidelity and isolation simulations passed.");
+    puts("All 10 healthy clock simulations, 2 forced-fault recovery simulations, and 2 concurrency scenarios passed.");
     return 0;
 }

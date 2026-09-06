@@ -52,6 +52,8 @@ final class DeckTests: XCTestCase {
         let r = try route(); defer { DeckRouteDestroy(r) }
         XCTAssertTrue(pump(r).allSatisfy { $0 == 0 })
         XCTAssertEqual(DeckRouteSnapshot(r).underruns, 0)
+        XCTAssertEqual(DeckRouteSnapshot(r).droppedFrames, DeckRouteSnapshot(r).primingDroppedFrames)
+        XCTAssertGreaterThan(DeckRouteSnapshot(r).primingDroppedFrames, 0)
         XCTAssertGreaterThan(DeckRouteSnapshot(r).inputRMS, 0)
     }
     func testExtremelyLowDefaultAndAbsoluteCeiling() throws {
@@ -88,6 +90,7 @@ final class DeckTests: XCTestCase {
         let s = DeckRouteSnapshot(r)
         XCTAssertEqual(s.overruns, 1)
         XCTAssertEqual(s.droppedFrames, 128)
+        XCTAssertEqual(s.primingDroppedFrames, 0, "Overflow is never classified as priming")
     }
     func testUnderrunSilencesAndReprimes() throws {
         let r = try route(); defer { DeckRouteDestroy(r) }

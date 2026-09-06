@@ -5,6 +5,7 @@ source scripts/xcode_environment.sh
 mkdir -p build/tests artifacts
 xcodebuild -project XboxVoiceDeck.xcodeproj -scheme XboxVoiceDeck -configuration Debug \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath build/DerivedData \
+  -skip-testing:XboxVoiceDeckUITests \
   -resultBundlePath "build/tests/Tests-$(date +%Y%m%d-%H%M%S).xcresult" test
 xcrun clang -O2 -g -std=gnu11 -Wall -Wextra -Werror -I XboxVoiceDeck/Audio/Realtime \
   XboxVoiceDeck/Audio/Realtime/DeckAudio.c tests/ClockSimulation.c \

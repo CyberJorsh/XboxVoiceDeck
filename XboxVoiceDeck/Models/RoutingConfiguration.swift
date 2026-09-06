@@ -13,6 +13,9 @@ struct RoutingConfiguration: Codable, Equatable {
     var selectedUIDs: [String] { [headsetMicUID, headsetOutputUID, xboxInputUID, xboxOutputUID] }
 
     func resolve(in devices: [AudioEndpoint]) throws -> [AudioEndpoint] {
+        guard [0, 32, 64, 128, 256, 512].contains(requestedBuffer) else {
+            throw AudioFailure("Choose Keep hardware or a 32/64/128/256/512-frame buffer request.")
+        }
         guard !selectedUIDs.contains("") else { throw AudioFailure("Select all four endpoints explicitly.") }
         guard headsetMicUID != xboxInputUID else { throw AudioFailure("Headset microphone and Xbox input must be different devices.") }
         guard headsetOutputUID != xboxOutputUID else { throw AudioFailure("Headset and Xbox outputs must be different devices to keep the paths isolated.") }
@@ -21,6 +24,9 @@ struct RoutingConfiguration: Codable, Equatable {
             guard device.alive else { throw AudioFailure("DISCONNECTED: \(device.name)") }
             guard device.supported else { throw AudioFailure("UNSUPPORTED FORMAT: \(device.name) is \(Int(device.sampleRate)) Hz. Select 44.1 or 48 kHz in Audio MIDI Setup.") }
             guard device.bufferFrames > 0 && device.bufferFrames <= 4096 else { throw AudioFailure("Unsupported buffer size on \(device.name).") }
+            guard requestedBuffer == 0 || device.bufferFrames == requestedBuffer || device.bufferRange?.contains(requestedBuffer) == true else {
+                throw AudioFailure("\(device.name) does not report support for \(requestedBuffer) frames. Choose Keep hardware or a supported size.")
+            }
             return device
         }
         guard micChannel >= 0, micChannel < endpoints[0].inputChannels,

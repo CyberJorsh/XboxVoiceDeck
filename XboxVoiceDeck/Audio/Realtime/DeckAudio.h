@@ -14,6 +14,7 @@ typedef struct {
     float inputLeft, inputRight;
     uint64_t inputClips, outputClips, limitedSamples;
     uint64_t underruns, overruns, droppedFrames, resyncs;
+    uint64_t primingDroppedFrames;
     uint64_t inputCallbacks, outputCallbacks;
     uint32_t bufferedFrames, targetFrames;
     double correctionPPM;

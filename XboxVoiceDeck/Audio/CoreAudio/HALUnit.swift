@@ -37,6 +37,18 @@ final class HALUnit {
                 mBitsPerChannel: 32, mReserved: 0)
             try set(kAudioUnitProperty_StreamFormat, scope: capture ? kAudioUnitScope_Output : kAudioUnitScope_Input,
                     bus: capture ? 1 : 0, value: format)
+            var accepted = AudioStreamBasicDescription()
+            var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            try checkAudio(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat,
+                capture ? kAudioUnitScope_Output : kAudioUnitScope_Input, capture ? 1 : 0,
+                &accepted, &formatSize), "Read back AUHAL client format")
+            guard accepted.mSampleRate == format.mSampleRate,
+                  accepted.mFormatID == format.mFormatID, accepted.mFormatFlags == format.mFormatFlags,
+                  accepted.mChannelsPerFrame == format.mChannelsPerFrame,
+                  accepted.mBytesPerFrame == 4, accepted.mBytesPerPacket == 4,
+                  accepted.mFramesPerPacket == 1, accepted.mBitsPerChannel == 32 else {
+                throw AudioFailure("AUHAL did not accept the requested noninterleaved Float32 client format for \(device.name).")
+            }
             try set(kAudioUnitProperty_MaximumFramesPerSlice, scope: kAudioUnitScope_Global, bus: 0, value: maxFrames)
             if capture {
                 try set(kAudioUnitProperty_ShouldAllocateBuffer, scope: kAudioUnitScope_Output, bus: 1, value: UInt32(0))

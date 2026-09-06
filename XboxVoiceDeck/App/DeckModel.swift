@@ -17,13 +17,13 @@ final class DeckModel: ObservableObject {
     @Published var micGain: Double = 1 { didSet { updateLevels() } }
     @Published var xboxMuted = true {
         didSet {
-            if !running || busy { xboxMuted = true }
+            if (!running || busy) && !xboxMuted { xboxMuted = true; return }
             engine.mute(xboxMuted, outgoing: true)
         }
     }
     @Published var headphoneMuted = true {
         didSet {
-            if !running || busy { headphoneMuted = true }
+            if (!running || busy) && !headphoneMuted { headphoneMuted = true; return }
             engine.mute(headphoneMuted, outgoing: false)
         }
     }
@@ -33,32 +33,39 @@ final class DeckModel: ObservableObject {
     @Published private(set) var toneBusy = false
     @Published private(set) var offlineBusy = false
     @Published private(set) var offlineResult: OfflineSafetyResult?
-    private let calibrationStore = CalibrationStore()
+    private let calibrationStore: CalibrationStore
+    private let services: DeckServices
+    var microphoneAuthorization: AVAuthorizationStatus { services.authorization() }
+    var isSimulated: Bool { services.simulated }
     private var toneGeneration = 0
     private var toneRequestPending = false
     private var inactivityObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
-    private let engine = AudioRoutingEngine()
-    private let watcher = AudioDeviceWatcher()
+    private let engine: DeckRoutingEngine
     private var meterTimer: Timer?
     private var inventoryTimer: Timer?
     private var activeEndpoints: [AudioEndpoint] = []
     private var watchedIDs: [AudioDeviceID] = []
     private var lastCounts: [UInt64] = []
-    private var lastProgress: [Date] = []
+    private var lastProgress: [TimeInterval] = []
     private var lastXruns: [UInt64] = []
     private var snapshotPending = false
+    private var sessionGeneration: UInt64 = 0
     private var terminationObserver: NSObjectProtocol?
     private var startGate = RoutingStartGate()
     private var stopping = false
 
-    init() {
+    init(services: DeckServices = .live()) {
+        self.services = services
+        self.engine = services.engine
+        self.calibrationStore = CalibrationStore(defaults: services.defaults)
         Logger.audio.info("Application launch")
-        if let saved = UserDefaults.standard.data(forKey: "routing.phase1"),
+        if let saved = services.defaults.data(forKey: "routing.phase1"),
            let loaded = try? JSONDecoder().decode(RoutingConfiguration.self, from: saved) { configuration = loaded }
         do { profiles = try calibrationStore.load() }
         catch { self.error = "Cannot load calibration profiles: \(error.localizedDescription)" }
         refresh()
+        guard services.runtimeEvents else { return }
         meterTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollMeters() }
         }
@@ -67,23 +74,28 @@ final class DeckModel: ObservableObject {
         inventoryTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
-        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [engine] _ in
-            engine.stopSynchronously()
+        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            // Termination must synchronously silence/dispose the live session.
+            MainActor.assumeIsolated { self?.engine.stopSynchronously() }
         }
         inactivityObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.cancelTone() }
         }
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                self?.cancelTone()
-                if let self, self.running || self.busy { self.stop(reason: "STOPPED — Mac sleeping; restart explicitly") }
+                self?.handleSleep()
             }
         }
     }
 
+    func handleSleep() {
+        cancelTone()
+        if running || busy { stop(reason: "STOPPED — Mac sleeping; restart explicitly") }
+    }
+
     func refresh() {
         do {
-            let updated = try AudioDeviceManager.enumerate()
+            let updated = try services.enumerate()
             if devices != updated {
                 Logger.audio.info("Device inventory, rate, buffer or jack state changed")
                 devices = updated
@@ -91,7 +103,7 @@ final class DeckModel: ObservableObject {
             let ids = updated.map(\.id)
             if watchedIDs != ids || watchedIDs.isEmpty {
                 watchedIDs = ids
-                watcher.watch(updated) { [weak self] in self?.refresh() }
+                services.watcher?.watch(updated) { [weak self] in self?.refresh() }
             }
             if running && !busy {
                 let current = updated.filter { device in activeEndpoints.contains { $0.uid == device.uid } }
@@ -114,11 +126,11 @@ final class DeckModel: ObservableObject {
         catch { self.error = error.localizedDescription; return }
         busy = true
         let request = startGate.begin()
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        switch microphoneAuthorization {
         case .authorized: beginRouting(request: request)
         case .notDetermined:
             status = "Waiting for microphone permission"
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
+            services.requestPermission { [weak self] allowed in
                 Task { @MainActor in
                     guard let self, self.startGate.accepts(request) else { return }
                     if allowed { self.beginRouting(request: request) } else { self.permissionDenied(request: request) }
@@ -145,11 +157,13 @@ final class DeckModel: ObservableObject {
             switch result {
             case .success(let endpoints):
                 self.activeEndpoints = endpoints
+                self.lastCounts = [0, 0, 0, 0]
+                self.sessionGeneration &+= 1
+                self.snapshotPending = false
+                self.lastProgress = Array(repeating: self.services.now(), count: 4)
+                self.lastXruns = []
                 self.running = true
                 self.status = "CONNECTED — both outputs muted; check meters before unmuting"
-                self.lastCounts = [0, 0, 0, 0]
-                self.lastProgress = Array(repeating: Date(), count: 4)
-                self.lastXruns = []
                 self.updateLevels()
                 self.saveConfiguration()
                 self.refresh()
@@ -160,6 +174,8 @@ final class DeckModel: ObservableObject {
     func stop(reason: String = "STOPPED") {
         guard !stopping else { return }
         startGate.cancel()
+        sessionGeneration &+= 1
+        snapshotPending = false
         stopping = true
         cancelTone(); reviewedContext = nil
         busy = true
@@ -180,20 +196,26 @@ final class DeckModel: ObservableObject {
     func saveConfiguration() {
         do {
             let data = try JSONEncoder().encode(configuration)
-            UserDefaults.standard.set(data, forKey: "routing.phase1")
+            services.defaults.set(data, forKey: "routing.phase1")
             Logger.audio.info("Explicit device selection saved")
         } catch { self.error = "Cannot save configuration: \(error.localizedDescription)" }
     }
     private func updateLevels() {
         engine.levels(micGain: Float(micGain), xboxDB: Float(xboxDB), headphoneDB: Float(headphoneDB))
     }
-    private func pollMeters() {
+    func pollMeters() {
         guard running, !busy, !snapshotPending else { return }
         snapshotPending = true
+        let generation = sessionGeneration
         engine.snapshot { [weak self] value in
-            guard let self else { return }
+            guard let self, self.sessionGeneration == generation else { return }
             self.snapshotPending = false
-            guard self.running, !self.busy, let value else { return }
+            guard self.running, !self.busy else { return }
+            guard let value else {
+                self.error = "The active audio session became unavailable. Both routes have been stopped."
+                self.stop(reason: "AUDIO ERROR — missing session")
+                return
+            }
             self.snapshot = value
             if self.toneBusy && !self.toneRequestPending && !value.outgoing.toneActive && value.outgoing.muted {
                 self.toneBusy = false
@@ -207,10 +229,10 @@ final class DeckModel: ObservableObject {
             }
             let counts = [value.outgoing.inputCallbacks, value.outgoing.outputCallbacks, value.incoming.inputCallbacks, value.incoming.outputCallbacks]
             for index in counts.indices {
-                if counts[index] != self.lastCounts[index] { self.lastProgress[index] = Date() }
+                if counts[index] != self.lastCounts[index] { self.lastProgress[index] = self.services.now() }
             }
             self.lastCounts = counts
-            if self.lastProgress.contains(where: { Date().timeIntervalSince($0) > 2 }) {
+            if self.lastProgress.contains(where: { self.services.now() - $0 > 2 }) {
                 self.error = "An audio endpoint stopped delivering callbacks. Both routes have been stopped."
                 self.stop(reason: "AUDIO ERROR — stalled device")
             }
@@ -235,9 +257,9 @@ final class DeckModel: ObservableObject {
         return String(format: "Estimated software budget %.1f ms + reported device latency %.1f ms (unmeasured)", software, device)
     }
     var diagnostics: String {
-        var lines = ["Xbox Voice Deck — Phase 2 software; physical calibration pending", "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)",
+        var lines = [isSimulated ? "SIMULATED TEST SESSION — no hardware audio or physical validation" : "Xbox Voice Deck — Phase 2 software; physical calibration pending", "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)",
                      "Architecture: \(machineValue("hw.machine")) · Model: \(machineValue("hw.model"))", status,
-                     "Format: Float32 at source device rate; one adaptive SRC per direction", "Permission: \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)",
+                     "Format: Float32 at source device rate; one adaptive SRC per direction", "Permission: \(microphoneAuthorization.rawValue)",
                      "Xbox: \(xboxDB) dB, mute \(xboxMuted); Headphones: \(headphoneDB) dB, mute \(headphoneMuted)",
                      "Selected IDs: \(activeEndpoints.map { String($0.id) }.joined(separator: ", "))"]
         for device in devices {
