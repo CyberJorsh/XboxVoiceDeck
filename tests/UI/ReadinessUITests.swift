@@ -16,6 +16,7 @@ final class ReadinessUITests: XCTestCase {
         XCTAssertEqual(app.state, .runningForeground)
         XCTAssertTrue(app.windows["Xbox Voice Deck"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["simulation.banner"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["routing.bypass"].isHittable, "Emergency bypass must fit on the usable display")
     }
     private func tab(_ name: String) {
         let radio = app.radioButtons[name]

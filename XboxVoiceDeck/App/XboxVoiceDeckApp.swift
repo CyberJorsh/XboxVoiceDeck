@@ -12,6 +12,7 @@ struct XboxVoiceDeckApp: App {
     }
     var body: some Scene {
         Window("Xbox Voice Deck", id: "deck") { DeckView(model: model) }
+            .defaultSize(width: 900, height: 680)
             .commands { DeckWindowCommands() }
     }
 }

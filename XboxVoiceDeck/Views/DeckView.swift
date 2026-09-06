@@ -41,7 +41,7 @@ struct DeckView: View {
                     .accessibilityIdentifier("routing.bypass")
                     .help("Restore unity microphone input gain. Cancel any tone and mute its output. Preserve safe gains. There are no effects or clips. This shortcut is app-local.")
             }
-        }.padding(20).frame(minWidth: 820, minHeight: 720)
+        }.padding(20).frame(minWidth: 820, minHeight: 620)
     }
 
     private var routing: some View {
