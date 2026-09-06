@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <mach/mach_time.h>
 
 #define TAPS 32
 #define PHASES 512
@@ -21,8 +22,8 @@ struct DeckRoute {
     _Atomic uint64_t written, read;
     float coefficients[PHASES + 1][TAPS];
     double fraction, integral, filteredError, correction;
-    bool primed, started;
-    float gain, fade;
+    bool primed;
+    float gain, outputRamp, fade, limiterGain, releaseCoefficient;
     _Atomic float inputGain, outputGain;
     _Atomic bool mute;
     _Atomic float inputRMS, inputPeak, outputRMS, outputPeak, inputLeft, inputRight;
@@ -31,6 +32,12 @@ struct DeckRoute {
     _Atomic uint64_t inputCallbacks, outputCallbacks;
     _Atomic uint32_t buffered;
     _Atomic double ppm;
+    _Atomic bool ready;
+    _Atomic uint64_t toneCommand, toneDeadline, toneFrames, limiterFrames;
+    _Atomic uint32_t toneFramesRemaining;
+    _Atomic float limiterReductionDB;
+    uint64_t seenToneCommand, toneDurationTicks;
+    uint32_t tonePosition;
 };
 struct DeckCapture {
     DeckRoute *route;
@@ -84,6 +91,11 @@ DeckRoute *DeckRouteCreate(double inRate, double outRate, uint32_t inBuffer,
     STORE(r->inputGain, 1);
     STORE(r->outputGain, xbox ? 0.001f : 0.1f);
     STORE(r->mute, true);
+    r->limiterGain = 1;
+    r->releaseCoefficient = (float)(1 - exp(-1 / (outRate * 0.1)));
+    mach_timebase_info_data_t timebase;
+    if (mach_timebase_info(&timebase) != KERN_SUCCESS || timebase.numer == 0) { DeckRouteDestroy(r); return NULL; }
+    r->toneDurationTicks = (uint64_t)(2000000000.0 * timebase.denom / timebase.numer);
     // Blackman-windowed sinc, normalized per fractional phase. Leave transition
     // bandwidth below Nyquist, including the maximum adaptive ratio correction.
     double cutoff = 0.90 / fmax(1, r->nominalRatio * 1.002);
@@ -101,13 +113,40 @@ DeckRoute *DeckRouteCreate(double inRate, double outRate, uint32_t inBuffer,
     return r;
 }
 void DeckRouteDestroy(DeckRoute *r) { if (r) { free(r->ring); free(r); } }
-void DeckRouteSetGain(DeckRoute *r, float inGain, float outDB, bool mute) {
+void DeckRouteSetLevels(DeckRoute *r, float inGain, float outDB) {
     STORE(r->inputGain, (float)clampd(clean(inGain), 0, 4));
     double db = isfinite(outDB) ? outDB : -90;
     STORE(r->outputGain, (float)pow(10, clampd(db, -90, r->xbox ? -30 : 0) / 20));
-    STORE(r->mute, mute);
 }
-void DeckRouteBypass(DeckRoute *r) { STORE(r->inputGain, 1); }
+static void finishTone(DeckRoute *r, uint64_t command) {
+    // A late completion cannot cancel a newer request. Generation and active
+    // flag share one atomic word; no callback/control-thread locks are needed.
+    if ((command & 1) && atomic_compare_exchange_strong(&r->toneCommand, &command, (command + 2) & ~UINT64_C(1))) {
+        STORE(r->mute, true);
+        STORE(r->toneFramesRemaining, 0);
+    }
+}
+void DeckRouteCancelTone(DeckRoute *r) {
+    uint64_t command = atomic_load_explicit(&r->toneCommand, memory_order_acquire);
+    finishTone(r, command);
+}
+void DeckRouteSetMuted(DeckRoute *r, bool mute) {
+    if (mute) { STORE(r->mute, true); DeckRouteCancelTone(r); }
+    else STORE(r->mute, false);
+}
+void DeckRouteSetGain(DeckRoute *r, float inGain, float outDB, bool mute) {
+    DeckRouteSetLevels(r, inGain, outDB);
+    DeckRouteSetMuted(r, mute);
+}
+bool DeckRouteStartTone(DeckRoute *r) {
+    if (!r->xbox || LOAD(r->mute) || !LOAD(r->ready)) return false;
+    uint64_t command = atomic_load_explicit(&r->toneCommand, memory_order_acquire);
+    if (command & 1) return false;
+    STORE(r->outputGain, fminf(LOAD(r->outputGain), 0.001f));
+    STORE(r->toneDeadline, mach_continuous_time() + r->toneDurationTicks);
+    return atomic_compare_exchange_strong(&r->toneCommand, &command, command + 3);
+}
+void DeckRouteBypass(DeckRoute *r) { DeckRouteCancelTone(r); STORE(r->inputGain, 1); }
 
 void DeckRoutePush(DeckRoute *r, const float *left, const float *right, uint32_t frames) {
     ADD(r->inputCallbacks, 1);
@@ -157,13 +196,15 @@ void DeckRoutePull(DeckRoute *r, float *left, float *right, uint32_t frames) {
         available = r->target;
         r->fraction = r->integral = r->filteredError = r->correction = 0;
         r->fade = 0;
-        r->primed = r->started = true;
+        r->primed = true;
+        STORE(r->ready, true);
     }
     if (available > r->target * 2) {
         ADD(r->droppedFrames, available - r->target); ADD(r->resyncs, 1);
         rd = w - r->target; available = r->target;
         r->fraction = r->integral = r->filteredError = r->correction = 0;
         r->fade = 0;
+        DeckRouteCancelTone(r);
     }
     double dt = frames / r->outputRate;
     double error = ((double)available - r->target) / r->target;
@@ -175,22 +216,30 @@ void DeckRoutePull(DeckRoute *r, float *left, float *right, uint32_t frames) {
     if (available < (uint64_t)ceil(r->fraction + frames * ratio) + TAPS) {
         ADD(r->underruns, 1); ADD(r->resyncs, 1); ADD(r->droppedFrames, available);
         atomic_store_explicit(&r->read, w, memory_order_release);
-        r->primed = false; r->gain = 0; r->fade = 0;
+        r->primed = false; r->gain = 0; r->outputRamp = 0; r->fade = 0;
+        STORE(r->ready, false);
+        DeckRouteCancelTone(r);
         return;
     }
-    float target = LOAD(r->outputGain) * LOAD(r->inputGain);
-    bool mute = LOAD(r->mute);
-    if (mute) r->gain = 0;
+    float target = LOAD(r->inputGain);
+    uint64_t command = atomic_load_explicit(&r->toneCommand, memory_order_acquire);
+    if ((command & 1) && mach_continuous_time() >= LOAD(r->toneDeadline)) finishTone(r, command);
+    if (command != r->seenToneCommand) { r->tonePosition = 0; r->seenToneCommand = command; }
     float slew = (float)(1 - exp(-1 / (r->outputRate * 0.01)));
     float peak = 0;
     double power = 0;
-    uint64_t limited = 0, clips = 0;
+    uint64_t limited = 0, clips = 0, limiterFrames = 0, toneFrames = 0;
     for (uint32_t i = 0; i < frames; ++i) {
         r->gain += (target - r->gain) * slew;
         r->fade = fminf(1, r->fade + (float)(1 / (r->outputRate * 0.005)));
         double phase = r->fraction * PHASES;
         int p = (int)phase;
         float blend = (float)(phase - p);
+        float samples[2] = {0, 0};
+        float signalPeak = 0;
+        bool tone = (command & 1) && command == atomic_load_explicit(&r->toneCommand, memory_order_acquire);
+        bool mute = LOAD(r->mute);
+        if (tone && mute) { finishTone(r, command); tone = false; }
         for (uint32_t ch = 0; ch < r->channels; ++ch) {
             float v = 0;
             for (uint32_t k = 0; k < TAPS; ++k) {
@@ -198,16 +247,40 @@ void DeckRoutePull(DeckRoute *r, float *left, float *right, uint32_t frames) {
                 uint32_t slot = (uint32_t)(rd + k) & (r->capacity - 1);
                 v += r->ring[slot * r->channels + ch] * c;
             }
-            // Limit the complete gain-scaled signal at an absolute output ceiling.
-            // This remains bounded even during gain ramps and input overdrive.
-            v = clean(v * r->gain * r->fade);
-            float ceiling = r->xbox ? 0.95f * LOAD(r->outputGain) : 0.95f;
+            // Calibration tone replaces the microphone; it cannot acquire mic
+            // input gain or enter the incoming/headphone route.
+            if (tone) {
+                double envelope = fmin(1, fmin(r->tonePosition, 2 * r->outputRate - 1 - r->tonePosition) / (0.01 * r->outputRate));
+                v = (float)(0.0316227766 * envelope * sin(2 * M_PI * 440 * r->tonePosition / r->outputRate));
+            } else v = clean(v * r->gain * r->fade);
+            samples[ch] = v;
+            signalPeak = fmaxf(signalPeak, fabsf(v));
+        }
+        // Instant attack, 100 ms exponential release, no look-ahead delay.
+        float desired = signalPeak > 0.89f ? 0.89f / signalPeak : 1;
+        if (desired < r->limiterGain) r->limiterGain = desired;
+        else r->limiterGain += (desired - r->limiterGain) * r->releaseCoefficient;
+        if (r->limiterGain < 0.999f && !mute) ++limiterFrames;
+        float outputGain = LOAD(r->outputGain);
+        if (tone) outputGain = fminf(outputGain, 0.001f);
+        if (mute) r->outputRamp = 0;
+        else if (outputGain < r->outputRamp) r->outputRamp = outputGain;
+        else r->outputRamp += (outputGain - r->outputRamp) * slew;
+        for (uint32_t ch = 0; ch < r->channels; ++ch) {
+            float v = clean(samples[ch] * r->limiterGain * r->outputRamp);
+            float ceiling = r->xbox ? 0.95f * outputGain : 0.95f;
             if (fabsf(v) > ceiling) { ++limited; v = copysignf(ceiling, v); }
             if (mute) v = 0;
             if (fabsf(v) >= 1) ++clips;
             if (ch == 0) left[i] = v; else if (right) right[i] = v;
             power += (double)v * v;
             peak = fmaxf(peak, fabsf(v));
+        }
+        if (tone) {
+            ++toneFrames;
+            ++r->tonePosition;
+            if (r->tonePosition >= (uint32_t)(2 * r->outputRate)) finishTone(r, command);
+            else STORE(r->toneFramesRemaining, (uint32_t)(2 * r->outputRate) - r->tonePosition);
         }
         if (r->channels == 1 && right) right[i] = left[i];
         r->fraction += ratio;
@@ -218,6 +291,8 @@ void DeckRoutePull(DeckRoute *r, float *left, float *right, uint32_t frames) {
     STORE(r->outputRMS, frames ? (float)sqrt(power / (frames * r->channels)) : 0);
     STORE(r->outputPeak, fmaxf(LOAD(r->outputPeak), peak));
     ADD(r->limitedSamples, limited); ADD(r->outputClips, clips);
+    ADD(r->limiterFrames, limiterFrames); ADD(r->toneFrames, toneFrames);
+    STORE(r->limiterReductionDB, -20 * log10f(fmaxf(r->limiterGain, 1e-20f)));
 }
 
 DeckSnapshot DeckRouteSnapshot(DeckRoute *r) {
@@ -227,8 +302,11 @@ DeckSnapshot DeckRouteSnapshot(DeckRoute *r) {
     SNAP(inputLeft); SNAP(inputRight); SNAP(inputClips); SNAP(outputClips); SNAP(limitedSamples);
     SNAP(underruns); SNAP(overruns); SNAP(droppedFrames); SNAP(resyncs);
     SNAP(inputCallbacks); SNAP(outputCallbacks);
+    SNAP(limiterReductionDB); SNAP(limiterFrames); SNAP(toneFrames); SNAP(toneFramesRemaining);
 #undef SNAP
     s.bufferedFrames = LOAD(r->buffered); s.targetFrames = r->target; s.correctionPPM = LOAD(r->ppm);
+    s.muted = LOAD(r->mute); s.toneActive = (LOAD(r->toneCommand) & 1) != 0;
+    if (!s.toneActive) s.toneFramesRemaining = 0;
     return s;
 }
 
@@ -266,13 +344,13 @@ OSStatus DeckInputCallback(void *context, AudioUnitRenderActionFlags *flags,
     (void)bus; (void)data;
     DeckCapture *c = context;
     if (DeckSafetyError(c->safety)) return noErr;
-    if (frames > c->maxFrames) { DeckSafetyTrip(c->safety, kAudioUnitErr_TooManyFramesToProcess); return noErr; }
+    if (frames > c->maxFrames) { DeckRouteSetMuted(c->route, true); DeckSafetyTrip(c->safety, kAudioUnitErr_TooManyFramesToProcess); return noErr; }
     for (uint32_t i = 0; i < c->channels; ++i) c->buffers->mBuffers[i].mDataByteSize = frames * sizeof(float);
     OSStatus status = AudioUnitRender(c->unit, flags, time, 1, frames, c->buffers);
-    if (status) { DeckSafetyTrip(c->safety, status); return noErr; }
+    if (status) { DeckRouteSetMuted(c->route, true); DeckSafetyTrip(c->safety, status); return noErr; }
     for (uint32_t i = 0; i < c->channels; ++i) {
         if (!c->buffers->mBuffers[i].mData || c->buffers->mBuffers[i].mDataByteSize < frames * sizeof(float)) {
-            DeckSafetyTrip(c->safety, kAudio_ParamError); return noErr;
+            DeckRouteSetMuted(c->route, true); DeckSafetyTrip(c->safety, kAudio_ParamError); return noErr;
         }
     }
     const float *left = c->buffers->mBuffers[c->first].mData;
@@ -284,21 +362,21 @@ OSStatus DeckOutputCallback(void *context, AudioUnitRenderActionFlags *flags,
                            const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *data) {
     (void)time; (void)bus;
     DeckOutput *o = context;
-    if (!data) { DeckSafetyTrip(o->safety, kAudio_ParamError); return noErr; }
+    if (!data) { DeckRouteSetMuted(o->route, true); DeckSafetyTrip(o->safety, kAudio_ParamError); return noErr; }
     for (uint32_t i = 0; i < data->mNumberBuffers; ++i) {
         if (data->mBuffers[i].mData) memset(data->mBuffers[i].mData, 0, data->mBuffers[i].mDataByteSize);
     }
-    if (DeckSafetyError(o->safety)) { *flags |= kAudioUnitRenderAction_OutputIsSilence; return noErr; }
+    if (DeckSafetyError(o->safety)) { DeckRouteSetMuted(o->route, true); *flags |= kAudioUnitRenderAction_OutputIsSilence; return noErr; }
     if (frames > o->maxFrames || data->mNumberBuffers != o->channels) {
-        DeckSafetyTrip(o->safety, kAudioUnitErr_TooManyFramesToProcess); return noErr;
+        DeckRouteSetMuted(o->route, true); DeckSafetyTrip(o->safety, kAudioUnitErr_TooManyFramesToProcess); return noErr;
     }
     for (uint32_t i = 0; i < data->mNumberBuffers; ++i) {
         if (!data->mBuffers[i].mData || data->mBuffers[i].mNumberChannels != 1 || data->mBuffers[i].mDataByteSize < frames * sizeof(float)) {
-            DeckSafetyTrip(o->safety, kAudio_ParamError); return noErr;
+            DeckRouteSetMuted(o->route, true); DeckSafetyTrip(o->safety, kAudio_ParamError); return noErr;
         }
     }
     DeckRoutePull(o->route, o->left, o->right, frames);
-    if (DeckSafetyError(o->safety)) return noErr;
+    if (DeckSafetyError(o->safety)) { DeckRouteSetMuted(o->route, true); return noErr; }
     memcpy(data->mBuffers[0].mData, o->left, frames * sizeof(float));
     if (o->channels > 1) memcpy(data->mBuffers[1].mData, o->right, frames * sizeof(float));
     // Channels above the selected stereo pair stay zero, never mirror arbitrary buses.

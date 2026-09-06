@@ -20,7 +20,7 @@ def refs(items):
     return '(' + ', '.join(items) + (',' if items else '') + ')'
 
 app_sources = sorted(str(p.relative_to(root)) for p in (root/'XboxVoiceDeck').rglob('*') if p.suffix in ['.swift', '.c'])
-test_sources = ['tests/DeckTests.swift', 'XboxVoiceDeck/Audio/Realtime/DeckAudio.c', 'XboxVoiceDeck/Audio/Devices/AudioDeviceManager.swift', 'XboxVoiceDeck/Models/RoutingConfiguration.swift']
+test_sources = ['tests/DeckTests.swift', 'XboxVoiceDeck/Audio/Realtime/DeckAudio.c', 'XboxVoiceDeck/Audio/Devices/AudioDeviceManager.swift', 'XboxVoiceDeck/Models/RoutingConfiguration.swift', 'XboxVoiceDeck/Settings/CalibrationStore.swift', 'XboxVoiceDeck/Audio/Diagnostics/OfflineSafetyCheck.swift']
 all_paths = sorted(set(app_sources + test_sources + ['XboxVoiceDeck/Audio/Realtime/DeckAudio.h', 'XboxVoiceDeck/Support/BridgingHeader.h', 'XboxVoiceDeck/Support/Info.plist', 'XboxVoiceDeck/Support/XboxVoiceDeck.entitlements']))
 file_refs = {}
 for path in all_paths:

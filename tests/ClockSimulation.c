@@ -74,12 +74,24 @@ static void *producer(void *arg) {
     atomic_store(&context->done, true);
     return NULL;
 }
+static void *controller(void *arg) {
+    ThreadContext *context = arg;
+    for (unsigned i = 0; i < 20000; ++i) {
+        DeckRouteSetLevels(context->route, i % 2 ? 2 : 1, -60);
+        DeckRouteSetMuted(context->route, false);
+        (void)DeckRouteStartTone(context->route);
+        DeckRouteCancelTone(context->route);
+    }
+    return NULL;
+}
 static void concurrency(void) {
     ThreadContext context = {.route = DeckRouteCreate(48000, 44100, 128, 128, 1, true), .done = false};
     assert(context.route);
     DeckRouteSetGain(context.route, 1, -60, false);
     pthread_t thread;
+    pthread_t controls;
     assert(pthread_create(&thread, NULL, producer, &context) == 0);
+    assert(pthread_create(&controls, NULL, controller, &context) == 0);
     float output[128];
     do {
         DeckRoutePull(context.route, output, NULL, 128);
@@ -87,7 +99,8 @@ static void concurrency(void) {
         (void)DeckRouteSnapshot(context.route);
     } while (!atomic_load(&context.done));
     assert(pthread_join(thread, NULL) == 0);
-    printf("Concurrent producer/consumer completed: 20,000 producer blocks; bounded finite output.\n");
+    assert(pthread_join(controls, NULL) == 0);
+    printf("Concurrent producer/consumer/control completed: 20,000 producer blocks and tone/gain/mute command cycles; bounded finite output.\n");
     DeckRouteDestroy(context.route);
 }
 

@@ -1,5 +1,7 @@
 # Phase 0/1 validation report
 
+The original report below is retained as the Phase 1 baseline. See [Phase 2 software validation](#phase-2-software-validation) for the subsequent safety implementation.
+
 Date: 2026-09-05. This report records the initial local validation before public repository publication. The repository includes source, the Xcode project and reproducible build/test scripts. Raw local logs, device snapshots, result bundles and compiled apps are excluded from Git; artifact paths below identify evidence retained on the original development host. Run the scripts to generate results on another Mac.
 
 ## Implemented architecture and scope
@@ -80,3 +82,20 @@ Follow [HARDWARE_SETUP.md](HARDWARE_SETUP.md) on the intended M1/HyperX/USB/cont
 7. Verify safe outgoing level using the console. Software gain/clamping cannot certify electrical compatibility or controller microphone detection.
 
 There is no honest substitute for these hardware gates. **Phase 1 physical acceptance is still open.** The next development step is to resolve any failures found there, then implement Phase 2's dedicated calibration/limiter workflow. Do not begin soundboard or voice effects yet.
+
+## Phase 2 software validation
+
+Date: 2026-09-05. App version 0.2.0. The user authorized software-only Phase 2 work while waiting for the physical hardware. **Phase 2 software implemented; physical calibration pending.** No soundboard or voice effects were started.
+
+Implemented: linked-channel sample-peak limiter (instant attack, 100 ms release, zero additional look-ahead frames), independent final output ceiling, bounded confirmed tone, cancellation/deadline/mute safeguards, calibration page, versioned local profiles with explicit review and muted restore, limiter/tone diagnostics, and a silent synthetic check callable from the app or CLI. Exact behavior is documented in [CALIBRATION.md](CALIBRATION.md).
+
+Local evidence (raw artifacts remain ignored):
+
+* **Debug and Release builds passed.** No source compile errors; Xcode's informational App Intents extraction warning remains. Logs: `artifacts/phase2-tests.log`, `artifacts/phase2-build-release.log`.
+* **28 XCTest cases passed, zero failures.** Includes the Phase 1 baseline plus limiter overload/attack/release, tone arming guards, two-second sample duration at both supported rates, tone-level caps under later gain edits, completion mute latch, cancellation before render, bypass, underrun/error cancellation, and deadline expiry after deliberately stalled rendering. Profile checks cover persistence, UID-based identity, channel/rate mismatch rejection, mandatory review, invalid levels, corrupt/unknown schema preservation and pending hardware status.
+* **Seven two-minute simulated clock runs passed**, with zero underruns/overruns/resyncs and the existing amplitude/frequency/stereo-isolation assertions. These are simulated minutes, not physical playback.
+* **ASan/UBSan and TSan stress passed**, now with three concurrent producer, consumer and control threads: 20,000 producer blocks plus 20,000 gain/mute/tone-start/cancel command cycles. No sanitizer reports. These checks concern application memory/state, not a USB driver's internals.
+* **The standalone silent diagnostic passed all six checks.** Command: `bash scripts/safety_check.sh`; log: `artifacts/phase2-offline-check.log`. Reported overload output peak was 0.000890 FS at −60 dB output gain; tone stayed at/below its −90 dBFS cap, completed and muted; later level changes did not unmute. The check uses the same kernel and function as the app's button; no Audio Units or audio devices are opened.
+* **Native UI inspection was partial.** The new Debug app launched and displayed “Phase 2 software · Physical calibration pending,” the Calibration tab, and the updated bypass help. The native automation connection closed while switching tabs; a screenshot retry also failed. App processes remained running, but the full interactive calibration screen, its confirmation dialog, profile buttons and inactive/sleep cancellation flow could not be accepted through UI automation. Their underlying processing/persistence behavior is exercised in tests; this is not a claim of complete end-to-end GUI validation.
+
+Still unverified: actual M1/HyperX capture and duplex routing; Xbox reception and mic detection; electrical interface/attenuation/loading; audible limiter/mute artifacts; physical tone output; 30-minute real-device stability; physical disconnect/sleep behavior; and measured end-to-end latency. No physical tone or microphone recording was used for this pass. The Phase 1 hardware gate remains open.

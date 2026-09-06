@@ -7,7 +7,7 @@ struct DeckView: View {
             HStack {
                 VStack(alignment: .leading) {
                     Text("Xbox Voice Deck").font(.largeTitle.bold())
-                    Text("Phase 1 · Local wired audio bridge · No voice effects yet").foregroundStyle(.secondary)
+                    Text("Phase 2 software · Physical calibration pending").foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button(model.running ? "Stop routing" : "Start muted") { model.running ? model.stop() : model.start() }
@@ -25,13 +25,14 @@ struct DeckView: View {
             TabView {
                 routing.tabItem { Label("Routing", systemImage: "cable.connector") }
                 levels.tabItem { Label("Meters & safety", systemImage: "waveform") }
+                CalibrationView(model: model).tabItem { Label("Calibration", systemImage: "slider.horizontal.3") }
                 diagnostics.tabItem { Label("Diagnostics", systemImage: "stethoscope") }
             }
             HStack {
                 Text("Xbox incoming → headphones only. Mic → Xbox only. Sidetone off.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("BYPASS ALL") { model.bypass() }.keyboardShortcut("b", modifiers: [.command, .shift])
-                    .help("Restore unity microphone input gain. Preserve both output gains and mutes. There are no effects or clips in Phase 1. This shortcut is app-local.")
+                    .help("Restore unity microphone input gain. Cancel any tone and mute its output. Preserve safe gains. There are no effects or clips. This shortcut is app-local.")
             }
         }.padding(20).frame(minWidth: 820, minHeight: 720)
     }
@@ -103,16 +104,16 @@ struct DeckView: View {
                 GroupBox("OUTGOING · HyperX microphone → Xbox microphone") {
                     VStack(alignment: .leading, spacing: 10) {
                         meter("Raw microphone", rms: model.snapshot.outgoing.inputRMS, peak: model.snapshot.outgoing.inputPeak, clips: model.snapshot.outgoing.inputClips)
-                        HStack { Text("Mic input gain"); Slider(value: $model.micGain, in: 0...4); Text(String(format: "%.2f×", model.micGain)).monospacedDigit() }
+                        HStack { Text("Mic input gain"); Slider(value: $model.micGain, in: 0...4).disabled(model.toneBusy); Text(String(format: "%.2f×", model.micGain)).monospacedDigit() }
                         meter("Xbox output · after safety gain", rms: model.snapshot.outgoing.outputRMS, peak: model.snapshot.outgoing.outputPeak, clips: model.snapshot.outgoing.outputClips)
                         HStack {
                             Text("Xbox output")
-                            Slider(value: $model.xboxDB, in: -90 ... -30, step: 1)
+                            Slider(value: $model.xboxDB, in: -90 ... -30, step: 1).disabled(model.toneBusy)
                             Text("\(Int(model.xboxDB)) dB").monospacedDigit().frame(width: 60)
-                            Toggle("Mute", isOn: $model.xboxMuted).toggleStyle(.switch)
+                            Toggle("Mute", isOn: $model.xboxMuted).toggleStyle(.switch).disabled(model.toneBusy)
                         }
                         counters(model.snapshot.outgoing)
-                        Text("Digital ceiling hits: \(model.snapshot.outgoing.limitedSamples) samples. This is clipping protection, not electrical attenuation.").font(.caption)
+                        Text(String(format: "Limiter reduction %.1f dB · active frames %llu · final clamp hits %llu", model.snapshot.outgoing.limiterReductionDB, model.snapshot.outgoing.limiterFrames, model.snapshot.outgoing.limitedSamples)).font(.caption)
                         Text(model.latency(outgoing: true)).font(.caption).foregroundStyle(.secondary)
                     }.padding(6)
                 }
@@ -131,10 +132,10 @@ struct DeckView: View {
                         Text(model.latency(outgoing: false)).font(.caption).foregroundStyle(.secondary)
                     }.padding(6)
                 }
-                Text("Meters are dBFS. Peaks and clip counts are held for the current run. Outputs start muted; unmute headphones first after confirming wiring, then cautiously test the Xbox mic. No test tone is implemented in Phase 1.").font(.caption)
+                Text("Meters are dBFS. Peaks and clip counts are held for the current run. Outputs start muted; unmute headphones first after confirming wiring, then cautiously test the Xbox mic. Use Calibration for the confirmed low-level tone.").font(.caption)
                 safetyWarning
             }.padding()
-        }
+        }.disabled(!model.running || model.busy)
     }
 
     private func meter(_ label: String, rms: Float, peak: Float, clips: UInt64) -> some View {

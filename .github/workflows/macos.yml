@@ -41,6 +41,9 @@ jobs:
       - name: Run XCTest, clock simulations and sanitizers
         run: bash scripts/test.sh
 
+      - name: Run silent software safety diagnostic
+        run: bash scripts/safety_check.sh
+
       - name: Retain test reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -15,8 +15,29 @@ final class DeckModel: ObservableObject {
     @Published var xboxDB: Double = -60 { didSet { updateLevels() } }
     @Published var headphoneDB: Double = -20 { didSet { updateLevels() } }
     @Published var micGain: Double = 1 { didSet { updateLevels() } }
-    @Published var xboxMuted = true { didSet { updateLevels() } }
-    @Published var headphoneMuted = true { didSet { updateLevels() } }
+    @Published var xboxMuted = true {
+        didSet {
+            if !running || busy { xboxMuted = true }
+            engine.mute(xboxMuted, outgoing: true)
+        }
+    }
+    @Published var headphoneMuted = true {
+        didSet {
+            if !running || busy { headphoneMuted = true }
+            engine.mute(headphoneMuted, outgoing: false)
+        }
+    }
+    @Published private(set) var profiles: [CalibrationProfile] = []
+    @Published var calibrationMessage = "Physical calibration pending. Saved levels are not electrical certification."
+    @Published var reviewedContext: CalibrationContext?
+    @Published private(set) var toneBusy = false
+    @Published private(set) var offlineBusy = false
+    @Published private(set) var offlineResult: OfflineSafetyResult?
+    private let calibrationStore = CalibrationStore()
+    private var toneGeneration = 0
+    private var toneRequestPending = false
+    private var inactivityObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
     private let engine = AudioRoutingEngine()
     private let watcher = AudioDeviceWatcher()
     private var meterTimer: Timer?
@@ -33,6 +54,8 @@ final class DeckModel: ObservableObject {
         Logger.audio.info("Application launch")
         if let saved = UserDefaults.standard.data(forKey: "routing.phase1"),
            let loaded = try? JSONDecoder().decode(RoutingConfiguration.self, from: saved) { configuration = loaded }
+        do { profiles = try calibrationStore.load() }
+        catch { self.error = "Cannot load calibration profiles: \(error.localizedDescription)" }
         refresh()
         meterTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pollMeters() }
@@ -44,6 +67,15 @@ final class DeckModel: ObservableObject {
         }
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [engine] _ in
             engine.stopSynchronously()
+        }
+        inactivityObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.cancelTone() }
+        }
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.cancelTone()
+                if self?.running == true { self?.stop(reason: "STOPPED — Mac sleeping; restart explicitly") }
+            }
         }
     }
 
@@ -98,6 +130,7 @@ final class DeckModel: ObservableObject {
         error = "Microphone access is required for both inputs. Open System Settings → Privacy & Security → Microphone and enable Xbox Voice Deck, then restart the app if requested."
     }
     private func beginRouting() {
+        reviewedContext = nil
         xboxMuted = true; headphoneMuted = true; xboxDB = min(xboxDB, -60)
         status = "Starting explicit AUHAL routes…"
         let requested = configuration
@@ -121,6 +154,7 @@ final class DeckModel: ObservableObject {
     }
     func stop(reason: String = "STOPPED") {
         guard !busy else { return }
+        cancelTone(); reviewedContext = nil
         busy = true
         xboxMuted = true; headphoneMuted = true
         engine.stop { [weak self] errors in
@@ -130,6 +164,7 @@ final class DeckModel: ObservableObject {
         }
     }
     func bypass() {
+        cancelTone()
         micGain = 1
         engine.bypass()
         status = running ? "BYPASS — normal mic, output gains and mutes preserved" : "STOPPED — normal mic selected"
@@ -142,8 +177,7 @@ final class DeckModel: ObservableObject {
         } catch { self.error = "Cannot save configuration: \(error.localizedDescription)" }
     }
     private func updateLevels() {
-        engine.levels(micGain: Float(micGain), xboxDB: Float(xboxDB), xboxMuted: xboxMuted,
-                      headphoneDB: Float(headphoneDB), headphoneMuted: headphoneMuted)
+        engine.levels(micGain: Float(micGain), xboxDB: Float(xboxDB), headphoneDB: Float(headphoneDB))
     }
     private func pollMeters() {
         guard running, !busy, !snapshotPending else { return }
@@ -153,6 +187,11 @@ final class DeckModel: ObservableObject {
             self.snapshotPending = false
             guard self.running, !self.busy, let value else { return }
             self.snapshot = value
+            if self.toneBusy && !self.toneRequestPending && !value.outgoing.toneActive && value.outgoing.muted {
+                self.toneBusy = false
+                self.xboxMuted = true
+                self.calibrationMessage = "Tone stopped. Xbox output is muted; physical calibration remains pending."
+            }
             if value.error != 0 {
                 self.error = "Realtime callback failed with Core Audio status \(value.error). Both routes were silenced."
                 self.stop(reason: "AUDIO ERROR")
@@ -188,7 +227,7 @@ final class DeckModel: ObservableObject {
         return String(format: "Estimated software budget %.1f ms + reported device latency %.1f ms (unmeasured)", software, device)
     }
     var diagnostics: String {
-        var lines = ["Xbox Voice Deck — Phase 1", "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)",
+        var lines = ["Xbox Voice Deck — Phase 2 software; physical calibration pending", "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)",
                      "Architecture: \(machineValue("hw.machine")) · Model: \(machineValue("hw.model"))", status,
                      "Format: Float32 at source device rate; one adaptive SRC per direction", "Permission: \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue)",
                      "Xbox: \(xboxDB) dB, mute \(xboxMuted); Headphones: \(headphoneDB) dB, mute \(headphoneMuted)",
@@ -203,13 +242,77 @@ final class DeckModel: ObservableObject {
         for (name, s) in [("Outgoing", snapshot.outgoing), ("Incoming", snapshot.incoming)] {
             lines += ["\n\(name): queue \(s.bufferedFrames)/\(s.targetFrames); ASRC \(String(format: "%.1f", s.correctionPPM)) ppm",
                       "Underruns \(s.underruns), overruns \(s.overruns), dropped \(s.droppedFrames), resyncs \(s.resyncs)",
-                      "Callbacks input/output: \(s.inputCallbacks)/\(s.outputCallbacks); digital ceiling hits: \(s.limitedSamples)"]
+                      "Callbacks input/output: \(s.inputCallbacks)/\(s.outputCallbacks); digital ceiling hits: \(s.limitedSamples)",
+                      "Limiter: \(String(format: "%.1f", s.limiterReductionDB)) dB reduction, \(s.limiterFrames) frames; zero look-ahead frames",
+                      "Tone active: \(s.toneActive), generated frames: \(s.toneFrames), remaining: \(s.toneFramesRemaining); kernel mute: \(s.muted)"]
         }
         lines += [latency(outgoing: true), latency(outgoing: false), "Callback error: \(snapshot.error)"]
         if let error { lines.append(error) }
         return lines.joined(separator: "\n")
     }
     func copyDiagnostics() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(diagnostics, forType: .string) }
+    var calibrationContext: CalibrationContext? {
+        try? CalibrationContext(configuration: configuration, devices: running ? activeEndpoints : devices)
+    }
+    var calibrationReviewed: Bool { calibrationContext != nil && reviewedContext == calibrationContext }
+    func saveProfile(name: String) {
+        guard running, !busy, !toneBusy, let context = calibrationContext else {
+            error = "Start the four selected endpoints before saving their actual format and buffer configuration."; return
+        }
+        do {
+            profiles = try calibrationStore.save(name: name, context: context, xboxDB: xboxDB, micGain: micGain)
+            calibrationMessage = "Profile saved locally. Physical calibration pending. It will never automatically unmute or restore gain."
+        } catch { self.error = error.localizedDescription }
+    }
+    func restoreProfile(_ profile: CalibrationProfile) {
+        guard running, !busy, !toneBusy, let context = calibrationContext else { error = "Start routing muted before reviewing and restoring a profile."; return }
+        do {
+            let settings = try profile.reviewedSettings(for: context, acknowledged: calibrationReviewed)
+            xboxMuted = true; headphoneMuted = true
+            micGain = settings.micGain; xboxDB = settings.xboxDB
+            reviewedContext = nil
+            calibrationMessage = "Restored \(profile.name). Both outputs remain muted. Recheck wiring and levels before manually unmuting."
+        } catch { self.error = error.localizedDescription }
+    }
+    func deleteProfile(_ profile: CalibrationProfile) {
+        do { profiles = try calibrationStore.delete(id: profile.id) }
+        catch { self.error = error.localizedDescription }
+    }
+    func confirmTone(expected: CalibrationContext) {
+        guard running, !busy, !toneBusy, !xboxMuted, calibrationReviewed, calibrationContext == expected else {
+            error = "Review this setup, start routing, and explicitly unmute Xbox output before confirming a tone."; return
+        }
+        toneGeneration += 1
+        let generation = toneGeneration
+        toneBusy = true; toneRequestPending = true
+        xboxDB = min(xboxDB, -60)
+        engine.startTone(expected: expected) { [weak self] result in
+            guard let self, self.toneGeneration == generation else { return }
+            self.toneRequestPending = false
+            switch result {
+            case .success: self.calibrationMessage = "Low-level tone active for at most two seconds. Xbox output will mute afterward."
+            case .failure(let error):
+                self.toneBusy = false; self.xboxMuted = true; self.error = error.localizedDescription
+            }
+        }
+    }
+    func cancelTone() {
+        toneGeneration += 1
+        engine.cancelTone()
+        if toneBusy {
+            xboxMuted = true
+            calibrationMessage = "Tone cancelled. Xbox output muted."
+        }
+        toneBusy = false; toneRequestPending = false
+    }
+    func runOfflineCheck() {
+        guard !offlineBusy, !running, !busy else { return }
+        offlineBusy = true; offlineResult = nil
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = OfflineSafetyCheck.run()
+            DispatchQueue.main.async { self?.offlineResult = result; self?.offlineBusy = false }
+        }
+    }
     private func machineValue(_ key: String) -> String {
         var size = 0
         guard sysctlbyname(key, nil, &size, nil, 0) == 0 else { return "Unknown" }

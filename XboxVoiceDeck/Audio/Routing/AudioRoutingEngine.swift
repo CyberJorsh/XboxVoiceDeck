@@ -16,10 +16,12 @@ private final class RoutingSession {
     var outgoing: OpaquePointer?
     var incoming: OpaquePointer?
     let endpoints: [AudioEndpoint]
+    let configuration: RoutingConfiguration
     private var closed = false
 
     init(configuration: RoutingConfiguration, endpoints: [AudioEndpoint]) throws {
         self.endpoints = endpoints
+        self.configuration = configuration
         guard let safety = DeckSafetyCreate() else { throw AudioFailure("Cannot create lock-free safety state.") }
         self.safety = safety
         outgoing = DeckRouteCreate(endpoints[0].sampleRate, endpoints[3].sampleRate,
@@ -58,6 +60,8 @@ private final class RoutingSession {
     func shutdown() -> [String] {
         guard !closed else { return [] }
         closed = true
+        if let outgoing { DeckRouteSetMuted(outgoing, true) }
+        if let incoming { DeckRouteSetMuted(incoming, true) }
         DeckSafetyTrip(safety, -1)
         var errors: [String] = []
         for unit in units.reversed() {
@@ -93,6 +97,8 @@ final class AudioRoutingEngine: @unchecked Sendable {
     private let queue = DispatchQueue(label: "XboxVoiceDeck.audio-control", qos: .userInitiated)
     private var session: RoutingSession?
     private var originalBuffers: [(device: AudioEndpoint, requested: UInt32)] = []
+    private var toneWatchdog: DispatchWorkItem?
+    private var toneID: UUID?
 
     func start(_ configuration: RoutingConfiguration, completion: @escaping (Result<[AudioEndpoint], Error>) -> Void) {
         queue.async {
@@ -127,6 +133,8 @@ final class AudioRoutingEngine: @unchecked Sendable {
         }
     }
     @discardableResult private func shutdown() -> [String] {
+        toneWatchdog?.cancel(); toneWatchdog = nil
+        toneID = nil
         var errors = session?.shutdown() ?? []
         session = nil
         // Restore only our buffer change, and only if no other app changed it since.
@@ -144,11 +152,53 @@ final class AudioRoutingEngine: @unchecked Sendable {
         for error in errors { Logger.audio.error("\(error, privacy: .public)") }
         return errors
     }
-    func levels(micGain: Float, xboxDB: Float, xboxMuted: Bool, headphoneDB: Float, headphoneMuted: Bool) {
+    func levels(micGain: Float, xboxDB: Float, headphoneDB: Float) {
         queue.async {
             guard let session = self.session else { return }
-            DeckRouteSetGain(session.outgoing!, micGain, xboxDB, xboxMuted)
-            DeckRouteSetGain(session.incoming!, 1, headphoneDB, headphoneMuted)
+            DeckRouteSetLevels(session.outgoing!, micGain, xboxDB)
+            DeckRouteSetLevels(session.incoming!, 1, headphoneDB)
+        }
+    }
+    func mute(_ muted: Bool, outgoing: Bool) {
+        queue.async {
+            guard let session = self.session else { return }
+            DeckRouteSetMuted(outgoing ? session.outgoing! : session.incoming!, muted)
+        }
+    }
+    func startTone(expected: CalibrationContext, completion: @escaping (Result<Void, Error>) -> Void) {
+        queue.async { [self] in
+            do {
+                guard let session = self.session, DeckSafetyError(session.safety) == 0 else { throw AudioFailure("Routing must be running without errors before a test tone.") }
+                let current = try AudioDeviceManager.enumerate()
+                let resolved = try session.configuration.resolve(in: current)
+                guard try CalibrationContext(configuration: session.configuration, devices: current) == expected,
+                      zip(resolved, session.endpoints).allSatisfy({ $0.runtimeSignature == $1.runtimeSignature }) else {
+                    throw AudioFailure("Devices changed since tone confirmation. Check the setup and confirm again.")
+                }
+                guard DeckRouteStartTone(session.outgoing!) else { throw AudioFailure("Tone requires an unmuted, primed Xbox route and no other active tone.") }
+                self.toneWatchdog?.cancel()
+                let toneID = UUID()
+                self.toneID = toneID
+                // A control-queue deadline backs up the callback's sample count
+                // and continuous-clock deadline, including a stalled device.
+                let deadline = DispatchWorkItem { [weak self, weak session] in
+                    guard let self, let session, self.session === session, self.toneID == toneID else { return }
+                    DeckRouteCancelTone(session.outgoing!)
+                }
+                self.toneWatchdog = deadline
+                self.queue.asyncAfter(deadline: .now() + 2, execute: deadline)
+                Logger.audio.info("Confirmed low-level calibration tone started (maximum two seconds)")
+                DispatchQueue.main.async { completion(.success(())) }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+    }
+    func cancelTone() {
+        queue.async {
+            self.toneWatchdog?.cancel(); self.toneWatchdog = nil
+            self.toneID = nil
+            if let route = self.session?.outgoing { DeckRouteCancelTone(route) }
         }
     }
     func bypass() {
