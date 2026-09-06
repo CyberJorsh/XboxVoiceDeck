@@ -8,7 +8,10 @@ final class ReadinessUITests: XCTestCase {
 
     private func launch(_ scenario: String = "ready") {
         app = XCUIApplication()
-        app.launchArguments = ["--ui-testing", "--ui-scenario", scenario]
+        // AppKit can treat unknown arguments as file-open requests, suppressing
+        // the initial window. Keep test setup out of the document-open path.
+        app.launchEnvironment["XVD_UI_TESTING"] = "1"
+        app.launchEnvironment["XVD_UI_SCENARIO"] = scenario
         app.launch()
         XCTAssertEqual(app.state, .runningForeground)
         XCTAssertTrue(app.windows["Xbox Voice Deck"].waitForExistence(timeout: 10))

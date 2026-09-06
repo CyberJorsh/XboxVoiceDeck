@@ -5,11 +5,9 @@ import Foundation
 // Debug-only fixtures are opt-in and cannot construct live audio services.
 // Their counters describe simulated control flow, never hardware validation.
 enum UITestFixture {
-    @MainActor static func makeModel(arguments: [String]) -> DeckModel? {
-        guard arguments.contains("--ui-testing") else { return nil }
-        let scenario = arguments.firstIndex(of: "--ui-scenario").flatMap { index in
-            arguments.indices.contains(index + 1) ? arguments[index + 1] : nil
-        } ?? "ready"
+    @MainActor static func makeModel(environment: [String: String]) -> DeckModel? {
+        guard environment["XVD_UI_TESTING"] == "1" else { return nil }
+        let scenario = environment["XVD_UI_SCENARIO"] ?? "ready"
         let inventory = scenario == "missing" ? [] : endpoints
         let engine = FixtureRoutingEngine(endpoints: inventory)
         let suite = "com.justjorshin.XboxVoiceDeck.UITestFixture"
