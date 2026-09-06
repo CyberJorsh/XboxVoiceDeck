@@ -2,6 +2,30 @@ import XCTest
 import CoreAudio
 
 final class DeckTests: XCTestCase {
+    func testSleepDuringPermissionRejectsLateGrantAndDenial() {
+        var gate = RoutingStartGate()
+        let permissionRequest = gate.begin()
+        gate.cancel() // Sleep before the permission dialog completes.
+        XCTAssertFalse(gate.accepts(permissionRequest), "A late grant must not begin routing")
+        XCTAssertFalse(gate.finish(permissionRequest), "A late denial must not replace the sleep status")
+        let explicitRestart = gate.begin()
+        XCTAssertFalse(gate.accepts(permissionRequest))
+        XCTAssertTrue(gate.accepts(explicitRestart))
+        XCTAssertTrue(gate.finish(explicitRestart))
+    }
+
+    func testSleepDuringEngineStartRejectsLateSuccessWithoutCancelingRestart() {
+        var gate = RoutingStartGate()
+        let engineRequest = gate.begin()
+        XCTAssertTrue(gate.accepts(engineRequest)) // Permission accepted, engine queued.
+        gate.cancel() // Shutdown is queued behind that engine start.
+        XCTAssertFalse(gate.finish(engineRequest), "Late success must not mark the model running")
+        let explicitRestart = gate.begin()
+        XCTAssertFalse(gate.finish(engineRequest), "Stale success must not consume a newer request")
+        XCTAssertTrue(gate.finish(explicitRestart))
+        XCTAssertFalse(gate.finish(explicitRestart), "Completion must only be accepted once")
+    }
+
     func route(xbox: Bool = true, inputRate: Double = 48000, outputRate: Double = 48000, channels: UInt32 = 1) throws -> OpaquePointer {
         try XCTUnwrap(DeckRouteCreate(inputRate, outputRate, 128, 128, channels, xbox))
     }
@@ -37,7 +61,8 @@ final class DeckTests: XCTestCase {
         DeckRouteSetGain(r, 4, 20, false) // Out-of-range requests cannot bypass protection.
         let output = pump(r, value: 5)
         XCTAssertLessThanOrEqual(output.map(abs).max()!, Float(0.95 * pow(10, -30.0 / 20)) + 0.000001)
-        XCTAssertGreaterThan(DeckRouteSnapshot(r).limitedSamples, 0)
+        XCTAssertGreaterThan(DeckRouteSnapshot(r).limiterFrames, 0)
+        XCTAssertGreaterThan(DeckRouteSnapshot(r).limiterReductionDB, 1)
     }
     func testMuteIsImmediateAndBypassPreservesSafety() throws {
         let r = try route(); defer { DeckRouteDestroy(r) }
@@ -117,6 +142,9 @@ final class DeckTests: XCTestCase {
     }
     func testCallbackOversizeFailsClosedWithoutWritingPastBuffer() throws {
         let r = try route(); defer { DeckRouteDestroy(r) }
+        DeckRouteSetGain(r, 1, -60, false)
+        _ = pump(r, value: 0)
+        XCTAssertTrue(DeckRouteStartTone(r))
         let safety = try XCTUnwrap(DeckSafetyCreate()); defer { DeckSafetyDestroy(safety) }
         let context = try XCTUnwrap(DeckOutputCreate(r, safety, 1, 8)); defer { DeckOutputDestroy(context) }
         var samples = [Float](repeating: 0.5, count: 10)
@@ -129,6 +157,8 @@ final class DeckTests: XCTestCase {
         XCTAssertEqual(DeckSafetyError(safety), kAudioUnitErr_TooManyFramesToProcess)
         XCTAssertTrue(samples.prefix(8).allSatisfy { $0 == 0 })
         XCTAssertEqual(Array(samples.suffix(2)), [0.5, 0.5])
+        XCTAssertFalse(DeckRouteSnapshot(r).toneActive)
+        XCTAssertTrue(DeckRouteSnapshot(r).muted)
     }
     func testSharedSafetySilencesAnotherOutput() throws {
         let r = try route(); defer { DeckRouteDestroy(r) }
@@ -184,5 +214,153 @@ final class DeckTests: XCTestCase {
     func testConfigurationSerialization() throws {
         XCTAssertEqual(try JSONDecoder().decode(RoutingConfiguration.self, from: JSONEncoder().encode(configuration)), configuration)
         XCTAssertThrowsError(try JSONDecoder().decode(RoutingConfiguration.self, from: Data("{}".utf8)))
+    }
+    func testLimiterAttackAndRelease() throws {
+        let r = try route(); defer { DeckRouteDestroy(r) }
+        DeckRouteSetGain(r, 1, -60, false)
+        _ = pump(r, value: 0.2)
+        var peak: Float = 0
+        for _ in 0..<40 { push(r, value: 20); peak = max(peak, pull(r).map(abs).max()!) }
+        let compressed = DeckRouteSnapshot(r).limiterReductionDB
+        XCTAssertLessThanOrEqual(peak, 0.000951)
+        XCTAssertGreaterThan(compressed, 20)
+        _ = pump(r, value: 0.2, blocks: 10)
+        let releasing = DeckRouteSnapshot(r).limiterReductionDB
+        XCTAssertGreaterThan(releasing, 1)
+        XCTAssertLessThan(releasing, compressed)
+        _ = pump(r, value: 0.2, blocks: 500)
+        XCTAssertLessThan(DeckRouteSnapshot(r).limiterReductionDB, 0.05)
+        XCTAssertEqual(DeckRouteSnapshot(r).limitedSamples, 0, "Envelope limiter should avoid the final hard clamp for ordinary finite overload")
+    }
+    func testToneRequiresUnmutedPrimedXboxRoute() throws {
+        let r = try route(); defer { DeckRouteDestroy(r) }
+        XCTAssertFalse(DeckRouteStartTone(r))
+        DeckRouteSetMuted(r, false)
+        XCTAssertFalse(DeckRouteStartTone(r))
+        _ = pump(r, value: 0)
+        XCTAssertTrue(DeckRouteStartTone(r))
+        XCTAssertFalse(DeckRouteStartTone(r), "No overlapping or extending a running tone")
+        let incoming = try route(xbox: false); defer { DeckRouteDestroy(incoming) }
+        DeckRouteSetGain(incoming, 1, -20, false)
+        _ = pump(incoming)
+        XCTAssertFalse(DeckRouteStartTone(incoming), "Tone cannot be routed to headphones by this API")
+    }
+    func testToneDurationCeilingAndCompletionMuteAtBothRates() throws {
+        for rate in [44100.0, 48000.0] {
+            let r = try route(inputRate: rate, outputRate: rate); defer { DeckRouteDestroy(r) }
+            DeckRouteSetGain(r, 4, -30, false)
+            _ = pump(r, value: 0)
+            XCTAssertTrue(DeckRouteStartTone(r))
+            DeckRouteSetLevels(r, 4, -30) // Even concurrent edits cannot amplify a tone.
+            var peak: Float = 0
+            for _ in 0..<800 { push(r, value: 10); peak = max(peak, pull(r).map(abs).max()!) }
+            let s = DeckRouteSnapshot(r)
+            XCTAssertEqual(s.toneFrames, UInt64(rate * 2))
+            XCTAssertLessThanOrEqual(peak, 0.0000317)
+            XCTAssertGreaterThan(peak, 0.00001)
+            XCTAssertFalse(s.toneActive)
+            XCTAssertEqual(s.toneFramesRemaining, 0)
+            XCTAssertTrue(s.muted)
+            DeckRouteSetLevels(r, 4, -30)
+            XCTAssertTrue(pump(r, value: 10).allSatisfy { $0 == 0 })
+        }
+    }
+    func testToneCancellationBeforeRenderAndBypass() throws {
+        let r = try route(); defer { DeckRouteDestroy(r) }
+        DeckRouteSetGain(r, 1, -60, false)
+        _ = pump(r, value: 0)
+        XCTAssertTrue(DeckRouteStartTone(r))
+        DeckRouteCancelTone(r)
+        XCTAssertTrue(pull(r).allSatisfy { $0 == 0 })
+        XCTAssertEqual(DeckRouteSnapshot(r).toneFrames, 0)
+        DeckRouteSetMuted(r, false)
+        XCTAssertTrue(DeckRouteStartTone(r))
+        _ = pump(r, value: 0, blocks: 20)
+        XCTAssertGreaterThan(DeckRouteSnapshot(r).toneFrames, 0)
+        DeckRouteBypass(r)
+        XCTAssertTrue(pull(r).allSatisfy { $0 == 0 })
+        XCTAssertTrue(DeckRouteSnapshot(r).muted)
+        XCTAssertFalse(DeckRouteSnapshot(r).toneActive)
+    }
+    func testToneUnderrunAndSharedErrorCancelOutput() throws {
+        let r = try route(); defer { DeckRouteDestroy(r) }
+        DeckRouteSetGain(r, 1, -60, false)
+        _ = pump(r, value: 0)
+        XCTAssertTrue(DeckRouteStartTone(r))
+        for _ in 0..<10 { _ = pull(r) }
+        XCTAssertTrue(DeckRouteSnapshot(r).muted)
+        XCTAssertFalse(DeckRouteSnapshot(r).toneActive)
+        _ = pump(r, value: 0)
+        DeckRouteSetMuted(r, false)
+        XCTAssertTrue(DeckRouteStartTone(r))
+        let safety = try XCTUnwrap(DeckSafetyCreate()); defer { DeckSafetyDestroy(safety) }
+        let context = try XCTUnwrap(DeckOutputCreate(r, safety, 1, 128)); defer { DeckOutputDestroy(context) }
+        DeckSafetyTrip(safety, -123)
+        var samples = [Float](repeating: 1, count: 128)
+        samples.withUnsafeMutableBufferPointer { values in
+            var list = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: 512, mData: values.baseAddress))
+            var flags: AudioUnitRenderActionFlags = []
+            var time = AudioTimeStamp()
+            _ = DeckOutputCallback(UnsafeMutableRawPointer(context), &flags, &time, 0, 128, &list)
+        }
+        XCTAssertTrue(samples.allSatisfy { $0 == 0 })
+        XCTAssertFalse(DeckRouteSnapshot(r).toneActive)
+        XCTAssertTrue(DeckRouteSnapshot(r).muted)
+    }
+    func testToneDeadlineDoesNotResumeAfterCallbackStall() throws {
+        let r = try route(); defer { DeckRouteDestroy(r) }
+        DeckRouteSetGain(r, 1, -60, false)
+        _ = pump(r, value: 0)
+        XCTAssertTrue(DeckRouteStartTone(r))
+        let deadline = expectation(description: "The actual two-second tone deadline expires without any renders")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.05) { deadline.fulfill() }
+        wait(for: [deadline], timeout: 5)
+        XCTAssertTrue(pull(r).allSatisfy { $0 == 0 })
+        XCTAssertEqual(DeckRouteSnapshot(r).toneFrames, 0)
+        XCTAssertTrue(DeckRouteSnapshot(r).muted)
+    }
+    func testSilentOfflineSafetyCheckUsesRealKernel() {
+        let result = OfflineSafetyCheck.run()
+        XCTAssertTrue(result.passed, result.summary)
+        XCTAssertEqual(result.checks.count, 6)
+    }
+    func testCalibrationProfilesPersistWithoutMuteOrVerificationClaims() throws {
+        let suite = "XboxVoiceDeckTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = CalibrationStore(defaults: defaults)
+        let context = try CalibrationContext(configuration: configuration, devices: devices)
+        let saved = try store.save(name: "My USB setup", context: context, xboxDB: -55, micGain: 1.2)
+        XCTAssertEqual(try CalibrationStore(defaults: defaults).load(), saved)
+        XCTAssertEqual(saved[0].hardwareStatus, "Physical calibration pending")
+        XCTAssertThrowsError(try saved[0].reviewedSettings(for: context, acknowledged: false))
+        XCTAssertEqual(try saved[0].reviewedSettings(for: context, acknowledged: true).xboxDB, -55)
+        XCTAssertTrue(try store.delete(id: saved[0].id).isEmpty)
+    }
+    func testProfileMatchingUsesUIDButRejectsChangedRateAndChannel() throws {
+        let context = try CalibrationContext(configuration: configuration, devices: devices)
+        let profile = CalibrationProfile(id: UUID(), name: "Test", context: context, xboxDB: -50, micGain: 1, savedAt: Date())
+        var changed = devices
+        changed[2] = endpoint(99, uid: "usb", inputs: 1, outputs: 2)
+        XCTAssertEqual(try CalibrationContext(configuration: configuration, devices: changed), context)
+        changed[2] = endpoint(99, uid: "usb", inputs: 1, outputs: 2, rate: 44100)
+        XCTAssertThrowsError(try profile.reviewedSettings(for: CalibrationContext(configuration: configuration, devices: changed), acknowledged: true))
+        changed[0] = endpoint(1, uid: "headset-in", inputs: 2, outputs: 0)
+        var channels = configuration; channels.micChannel = 1
+        XCTAssertThrowsError(try profile.reviewedSettings(for: CalibrationContext(configuration: channels, devices: changed), acknowledged: true))
+    }
+    func testInvalidCalibrationDataIsRejectedAndPreserved() throws {
+        let suite = "XboxVoiceDeckTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = CalibrationStore(defaults: defaults)
+        let context = try CalibrationContext(configuration: configuration, devices: devices)
+        XCTAssertThrowsError(try store.save(name: "Invalid", context: context, xboxDB: 0, micGain: 1))
+        XCTAssertThrowsError(try store.save(name: "Invalid", context: context, xboxDB: -60, micGain: .nan))
+        let corrupt = Data("{\"version\":999,\"profiles\":[]}".utf8)
+        defaults.set(corrupt, forKey: "calibration.profiles")
+        XCTAssertThrowsError(try store.load())
+        XCTAssertThrowsError(try store.save(name: "Test", context: context, xboxDB: -60, micGain: 1))
+        XCTAssertEqual(defaults.data(forKey: "calibration.profiles"), corrupt)
     }
 }

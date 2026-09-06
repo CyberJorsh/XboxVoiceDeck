@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dispatch/dispatch.h>
 
 static void simulate(double inputRate, double outputRate, double ppm, unsigned inBlock, unsigned outBlock) {
     DeckRoute *r = DeckRouteCreate(inputRate, outputRate, inBlock, outBlock, 2, false);
@@ -74,12 +75,24 @@ static void *producer(void *arg) {
     atomic_store(&context->done, true);
     return NULL;
 }
+static void *controller(void *arg) {
+    ThreadContext *context = arg;
+    for (unsigned i = 0; i < 20000; ++i) {
+        DeckRouteSetLevels(context->route, i % 2 ? 2 : 1, -60);
+        DeckRouteSetMuted(context->route, false);
+        (void)DeckRouteStartTone(context->route);
+        DeckRouteCancelTone(context->route);
+    }
+    return NULL;
+}
 static void concurrency(void) {
     ThreadContext context = {.route = DeckRouteCreate(48000, 44100, 128, 128, 1, true), .done = false};
     assert(context.route);
     DeckRouteSetGain(context.route, 1, -60, false);
     pthread_t thread;
+    pthread_t controls;
     assert(pthread_create(&thread, NULL, producer, &context) == 0);
+    assert(pthread_create(&controls, NULL, controller, &context) == 0);
     float output[128];
     do {
         DeckRoutePull(context.route, output, NULL, 128);
@@ -87,12 +100,64 @@ static void concurrency(void) {
         (void)DeckRouteSnapshot(context.route);
     } while (!atomic_load(&context.done));
     assert(pthread_join(thread, NULL) == 0);
-    printf("Concurrent producer/consumer completed: 20,000 producer blocks; bounded finite output.\n");
+    assert(pthread_join(controls, NULL) == 0);
+    printf("Concurrent producer/consumer/control completed: 20,000 producer blocks and tone/gain/mute command cycles; bounded finite output.\n");
     DeckRouteDestroy(context.route);
 }
 
+typedef struct {
+    DeckRoute *route;
+    dispatch_semaphore_t render, completed;
+} CancellationContext;
+
+static void *cancellationConsumer(void *arg) {
+    CancellationContext *context = arg;
+    float output[128];
+    for (unsigned cycle = 0; cycle < 2000; ++cycle) {
+        dispatch_semaphore_wait(context->render, DISPATCH_TIME_FOREVER);
+        DeckRoutePull(context->route, output, NULL, 128);
+        // The input is a much louder constant mic signal. Once tone start is
+        // published, concurrent cancellation may yield tone or silence only.
+        for (unsigned i = 0; i < 128; ++i) assert(isfinite(output[i]) && fabsf(output[i]) <= 0.0000317f);
+        dispatch_semaphore_signal(context->completed);
+    }
+    return NULL;
+}
+
+static void cancellationIsolation(void) {
+    CancellationContext context = {
+        .route = DeckRouteCreate(48000, 48000, 128, 128, 1, true),
+        .render = dispatch_semaphore_create(0), .completed = dispatch_semaphore_create(0)
+    };
+    assert(context.route && context.render && context.completed);
+    float mic[128], output[128];
+    for (unsigned i = 0; i < 128; ++i) mic[i] = 0.5f;
+    for (unsigned block = 0; block < 100; ++block) {
+        DeckRoutePush(context.route, mic, NULL, 128);
+        DeckRoutePull(context.route, output, NULL, 128);
+    }
+    pthread_t consumer;
+    assert(pthread_create(&consumer, NULL, cancellationConsumer, &context) == 0);
+    for (unsigned cycle = 0; cycle < 2000; ++cycle) {
+        DeckRoutePush(context.route, mic, NULL, 128);
+        DeckRouteSetMuted(context.route, false);
+        assert(DeckRouteStartTone(context.route));
+        dispatch_semaphore_signal(context.render);
+        if (cycle % 2) DeckRouteBypass(context.route);
+        else DeckRouteCancelTone(context.route);
+        dispatch_semaphore_wait(context.completed, DISPATCH_TIME_FOREVER);
+        DeckSnapshot snapshot = DeckRouteSnapshot(context.route);
+        assert(snapshot.muted && !snapshot.toneActive);
+    }
+    assert(pthread_join(consumer, NULL) == 0);
+    dispatch_release(context.render);
+    dispatch_release(context.completed);
+    DeckRouteDestroy(context.route);
+    puts("2,000 concurrent tone cancel/bypass render cycles passed: no live-mic substitution.");
+}
+
 int main(int argc, char **argv) {
-    if (argc == 2 && strcmp(argv[1], "--threads-only") == 0) { concurrency(); return 0; }
+    if (argc == 2 && strcmp(argv[1], "--threads-only") == 0) { concurrency(); cancellationIsolation(); return 0; }
     simulate(48000, 48000, 0, 128, 128);
     simulate(48000, 48000, 500, 128, 128);
     simulate(48000, 48000, -500, 128, 128);
@@ -101,6 +166,7 @@ int main(int argc, char **argv) {
     simulate(44100, 44100, 1000, 32, 64);
     simulate(48000, 48000, -1000, 512, 512);
     concurrency();
+    cancellationIsolation();
     puts("All clock, format, fidelity and isolation simulations passed.");
     return 0;
 }

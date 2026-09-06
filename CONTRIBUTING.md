@@ -1,6 +1,6 @@
 # Contributing
 
-Read [the architecture](docs/AUDIO_ARCHITECTURE.md) and [hardware safety guide](docs/HARDWARE_SETUP.md) first. The current scope is Phase 0/1. Physical validation on the intended M1, HyperX Cloud III and Xbox setup is still open; keep soundboard and effects work behind that gate.
+Read [the architecture](docs/AUDIO_ARCHITECTURE.md) and [hardware safety guide](docs/HARDWARE_SETUP.md) first. The current scope is Phase 1 routing plus Phase 2 software safety/calibration. Physical validation on the intended M1, HyperX Cloud III and Xbox setup is still open; keep soundboard and effects work behind that gate.
 
 ## Development
 

@@ -2,7 +2,7 @@
 
 A native Swift/SwiftUI macOS wired audio bridge for the HyperX Cloud III boom microphone and an Xbox Series S controller. All audio processing is local. No AI voice models, accounts, paid APIs, subscriptions, network audio, Remote Play, Electron, hosted services or bundled drivers.
 
-**This delivery implements Phase 0 and Phase 1 only. The physical Mac/HyperX/USB/Xbox bridge is not yet hardware-validated.** No soundboard, voice presets or advanced effects are included. Do not advance to them until the routing gate passes.
+**Phase 2 software implemented; physical calibration pending. The physical Mac/HyperX/USB/Xbox routing gate is still open.** No soundboard, voice presets or advanced effects are included. Do not advance to them until the routing gate passes.
 
 ## Implemented
 
@@ -12,9 +12,10 @@ A native Swift/SwiftUI macOS wired audio bridge for the HyperX Cloud III boom mi
 * Two independent routes using four Apple AUHAL units. Each route has a preallocated C11 SPSC ring, windowed-sinc adaptive sample-rate converter, gain/mute, meters and buffer counters. Swift owns device/control/UI work; audio callbacks stay entirely in C.
 * 44.1 and 48 kHz device formats; Float32 internally, with one adaptive conversion per direction. 48 kHz is preferred but hardware rates are never changed silently.
 * Requested buffer sizes 32/64/128/256/512 frames, with range/readback checks and a “Keep hardware” option. 128 is the initial candidate; the lowest stable size requires hardware testing. Changes can affect other apps using that device.
-* Both outputs start muted. Xbox gain starts at −60 dB, capped at −30 dB; digital clipping protection stays active. Headphone gain starts at −20 dB. Gain changes ramp.
+* Both outputs start muted. Xbox gain starts at −60 dB, capped at −30 dB; an instant-attack/100 ms-release limiter and independent hard ceiling stay active. Headphone gain starts at −20 dB. Gain changes ramp.
 * Actual raw mic, Xbox input (including L/R), Xbox output and headphone output meters with held peaks/clip counts, queue fill, drift correction, underrun/overrun/drop/resync counters.
-* Bypass restores normal unity microphone input gain and preserves safe output gain and mute. Cmd-Shift-B is **app-local**, not a global hotkey.
+* Bypass restores normal unity microphone input gain and preserves safe output gain. It cancels any calibration tone and latches Xbox mute; otherwise existing mutes are preserved. Cmd-Shift-B is **app-local**, not a global hotkey.
+* Dedicated calibration screen with 1 dB steps, limiter telemetry, confirmed two-second tone, reviewed device-specific profiles and a silent hardware-free safety check. See [CALIBRATION.md](docs/CALIBRATION.md).
 * Visible startup/callback errors, microphone permission handling, device/jack/rate/buffer invalidation with safe stop and explicit restart, copied diagnostics and local OSLog events. No microphone recordings.
 
 Read [Audio architecture](docs/AUDIO_ARCHITECTURE.md) for the decision made before implementation, alternatives, callback ownership, synchronization, drift strategy and limitations. Apple's [AUHAL technical note](https://developer.apple.com/library/archive/technotes/tn2091/_index.html) is the principal API reference.
@@ -52,7 +53,7 @@ USB adapter → Mac USB-C
 
 **The Xbox controller expects headset microphone-level audio. Depending on the USB audio adapter, an inline attenuator may be required. Software volume reduction does not guarantee electrical compatibility.** The controller headphone output can also overload a USB **mic** input. Read the full [wiring, CTIA pinout, mono/stereo and level guidance](docs/HARDWARE_SETUP.md) before connecting the output path.
 
-Select all four endpoints and actual input channels. A device labelled “MacBook microphone” is not proof that the HyperX boom mic is selected. Start muted, verify the two input meters independently, unmute headphones cautiously, then check outgoing microphone levels starting at −60 dB. No test tone is included. The Phase 1 “Meters & safety” tab provides the current manual calibration controls; a dedicated calibration page/wizard is deferred.
+Select all four endpoints and actual input channels. A device labelled “MacBook microphone” is not proof that the HyperX boom mic is selected. Start muted, verify the two input meters independently, unmute headphones cautiously, then check outgoing microphone levels starting at −60 dB. The Calibration tab provides a confirmed low-level tone and reviewed profile restoration. A hardware setup wizard remains deferred. Without devices, use its silent software safety check or `bash scripts/safety_check.sh`.
 
 The first valid start requests macOS microphone permission once. If denied, use **System Settings → Privacy & Security → Microphone → Xbox Voice Deck**. The app includes an explanatory button and does not repeatedly prompt. Both the headset capture and USB capture need permission. Rebuilding with a changed signing identity can require macOS permission approval again.
 
@@ -60,6 +61,7 @@ The first valid start requests macOS microphone permission once. If denied, use 
 
 ```sh
 bash scripts/test.sh
+bash scripts/safety_check.sh   # Silent: no audio devices opened
 bash scripts/device_probe.sh
 # Optional: zero-sample output-component test, with an explicitly enumerated ID:
 bash scripts/device_probe.sh --silent-output 71
@@ -67,7 +69,7 @@ bash scripts/device_probe.sh --silent-output 71
 
 Device IDs are volatile; **replace 71 with the current output ID**, do not reuse it blindly. The silent probe creates and starts one AUHAL output, checks 200 callbacks, and never captures a microphone or plays an audible signal. It does not validate input capture, physical cabling or Xbox reception.
 
-`scripts/test.sh` runs XCTest, seven simulated two-minute clock/rate/buffer cases, concurrent ring stress, and Address/UndefinedBehavior/Thread sanitizer stress. These tests cover only Phase 1 behavior. Preset, soundboard, hotkey and migration tests belong to their implementation phases.
+`scripts/test.sh` runs XCTest, seven simulated two-minute clock/rate/buffer cases, concurrent ring stress, and Address/UndefinedBehavior/Thread sanitizer stress. The tests cover Phase 1 routing and Phase 2 limiter/tone/profile safety. Soundboard, voice-preset and global-hotkey tests belong to their implementation phases.
 
 Test results are generated under `build/tests/`. Local `build/` and `artifacts/` directories are intentionally excluded from Git; machine logs and device snapshots are not published. See [VALIDATION.md](docs/VALIDATION.md) for the recorded first-pass results and outstanding gates. **Copy diagnostics** includes device/runtime statistics but no recorded microphone content, machine serial number or hardware UUID. OSLog events can be read with:
 
@@ -75,7 +77,7 @@ Test results are generated under `build/tests/`. Local `build/` and `artifacts/`
 log show --last 10m --predicate 'subsystem == "com.justjorshin.XboxVoiceDeck"'
 ```
 
-Settings are local UserDefaults for `com.justjorshin.XboxVoiceDeck`; only endpoint/channel/buffer selection is saved in this phase. Output gains and mutes reset safely on launch/start. No database is used. Do not enable logging inside the realtime callbacks.
+Settings are local UserDefaults for `com.justjorshin.XboxVoiceDeck`; endpoint/channel/buffer selections and explicitly saved calibration profiles are stored locally. Profiles never automatically restore levels or unmute outputs. Output gains and mutes reset safely on launch/start. No database is used. Do not enable logging inside the realtime callbacks.
 
 ## Troubleshooting and limitations
 
@@ -104,7 +106,7 @@ BlackHole is **not required or bundled**. If already installed, it appears throu
 ## Next phases
 
 1. **Finish the Phase 1 physical acceptance gate** in [HARDWARE_SETUP.md](docs/HARDWARE_SETUP.md): verify real boom mic capture, both simultaneous directions, no game audio into outgoing mic, sustained stability, unplug/reconnect and measured latency on the M1/Xbox setup.
-2. Phase 2: dedicated calibrated output workflow, confirmed low-level tone, improved limiter and electrical setup guidance grounded in the actual adapter.
+2. Complete physical Phase 2 calibration using the implemented [calibration workflow](docs/CALIBRATION.md), and resolve any limiter, electrical-interface or audible behavior issues found with the actual adapter.
 3. Phase 3: live traditional-DSP Normal/Deep/High/Radio/Robot, only after the route gate passes.
 4. Later: local soundboard mixed after mic DSP, Demon/Echo/custom JSON presets, global hotkeys, monitoring, fuller persistence, setup wizard and automatic safe reconnection.
 
