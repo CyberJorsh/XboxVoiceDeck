@@ -11,9 +11,17 @@ struct XboxVoiceDeckApp: App {
         #endif
     }
     var body: some Scene {
-        WindowGroup { DeckView(model: model) }
-            .commands {
-                CommandGroup(replacing: .newItem) { }
-            }
+        Window("Xbox Voice Deck", id: "deck") { DeckView(model: model) }
+            .commands { DeckWindowCommands() }
+    }
+}
+
+private struct DeckWindowCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("Show Xbox Voice Deck") { openWindow(id: "deck") }
+                .keyboardShortcut("n", modifiers: .command)
+        }
     }
 }

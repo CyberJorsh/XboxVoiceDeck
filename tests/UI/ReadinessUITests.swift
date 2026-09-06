@@ -10,6 +10,8 @@ final class ReadinessUITests: XCTestCase {
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing", "--ui-scenario", scenario]
         app.launch()
+        XCTAssertEqual(app.state, .runningForeground)
+        XCTAssertTrue(app.windows["Xbox Voice Deck"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.staticTexts["simulation.banner"].waitForExistence(timeout: 10))
     }
     private func tab(_ name: String) {
@@ -24,7 +26,7 @@ final class ReadinessUITests: XCTestCase {
         XCTAssertTrue(element.isHittable, "Expected visible control: \(element)")
     }
     private func waitText(_ id: String, contains value: String) {
-        let condition = NSPredicate(format: "label CONTAINS %@", value)
+        let condition = NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", value, value)
         expectation(for: condition, evaluatedWith: app.staticTexts[id])
         waitForExpectations(timeout: 5)
     }
