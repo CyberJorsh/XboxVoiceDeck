@@ -94,6 +94,7 @@ final class ReadinessUITests: XCTestCase {
         dialog.buttons["Play for up to 2 seconds"].click()
         XCTAssertTrue(app.buttons["calibration.stopTone"].isEnabled)
         app.buttons["routing.bypass"].click()
+        waitText("calibration.message", contains: "cancelled")
         XCTAssertFalse(app.buttons["calibration.stopTone"].isEnabled)
         XCTAssertFalse(confirm.isEnabled, "Tone cancellation must leave Xbox muted")
     }
