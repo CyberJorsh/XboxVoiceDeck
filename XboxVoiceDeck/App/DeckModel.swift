@@ -49,6 +49,8 @@ final class DeckModel: ObservableObject {
     private var lastXruns: [UInt64] = []
     private var snapshotPending = false
     private var terminationObserver: NSObjectProtocol?
+    private var startGate = RoutingStartGate()
+    private var stopping = false
 
     init() {
         Logger.audio.info("Application launch")
@@ -74,7 +76,7 @@ final class DeckModel: ObservableObject {
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.cancelTone()
-                if self?.running == true { self?.stop(reason: "STOPPED — Mac sleeping; restart explicitly") }
+                if let self, self.running || self.busy { self.stop(reason: "STOPPED — Mac sleeping; restart explicitly") }
             }
         }
     }
@@ -111,31 +113,34 @@ final class DeckModel: ObservableObject {
         do { _ = try configuration.resolve(in: devices) }
         catch { self.error = error.localizedDescription; return }
         busy = true
+        let request = startGate.begin()
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized: beginRouting()
+        case .authorized: beginRouting(request: request)
         case .notDetermined:
             status = "Waiting for microphone permission"
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
                 Task { @MainActor in
-                    guard let self else { return }
-                    if allowed { self.beginRouting() } else { self.permissionDenied() }
+                    guard let self, self.startGate.accepts(request) else { return }
+                    if allowed { self.beginRouting(request: request) } else { self.permissionDenied(request: request) }
                 }
             }
-        default: permissionDenied()
+        default: permissionDenied(request: request)
         }
     }
-    private func permissionDenied() {
+    private func permissionDenied(request: UUID) {
+        guard startGate.finish(request) else { return }
         busy = false
         status = "PERMISSION DENIED"
         error = "Microphone access is required for both inputs. Open System Settings → Privacy & Security → Microphone and enable Xbox Voice Deck, then restart the app if requested."
     }
-    private func beginRouting() {
+    private func beginRouting(request: UUID) {
+        guard startGate.accepts(request) else { return }
         reviewedContext = nil
         xboxMuted = true; headphoneMuted = true; xboxDB = min(xboxDB, -60)
         status = "Starting explicit AUHAL routes…"
         let requested = configuration
         engine.start(requested) { [weak self] result in
-            guard let self else { return }
+            guard let self, self.startGate.finish(request) else { return }
             self.busy = false
             switch result {
             case .success(let endpoints):
@@ -153,11 +158,14 @@ final class DeckModel: ObservableObject {
         }
     }
     func stop(reason: String = "STOPPED") {
-        guard !busy else { return }
+        guard !stopping else { return }
+        startGate.cancel()
+        stopping = true
         cancelTone(); reviewedContext = nil
         busy = true
         xboxMuted = true; headphoneMuted = true
         engine.stop { [weak self] errors in
+            self?.stopping = false
             self?.running = false; self?.busy = false; self?.status = reason
             self?.snapshot = RoutingSnapshot(); self?.activeEndpoints = []
             if !errors.isEmpty { self?.error = errors.joined(separator: "\n"); self?.status = "AUDIO ERROR — stopped" }

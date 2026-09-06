@@ -2,6 +2,30 @@ import XCTest
 import CoreAudio
 
 final class DeckTests: XCTestCase {
+    func testSleepDuringPermissionRejectsLateGrantAndDenial() {
+        var gate = RoutingStartGate()
+        let permissionRequest = gate.begin()
+        gate.cancel() // Sleep before the permission dialog completes.
+        XCTAssertFalse(gate.accepts(permissionRequest), "A late grant must not begin routing")
+        XCTAssertFalse(gate.finish(permissionRequest), "A late denial must not replace the sleep status")
+        let explicitRestart = gate.begin()
+        XCTAssertFalse(gate.accepts(permissionRequest))
+        XCTAssertTrue(gate.accepts(explicitRestart))
+        XCTAssertTrue(gate.finish(explicitRestart))
+    }
+
+    func testSleepDuringEngineStartRejectsLateSuccessWithoutCancelingRestart() {
+        var gate = RoutingStartGate()
+        let engineRequest = gate.begin()
+        XCTAssertTrue(gate.accepts(engineRequest)) // Permission accepted, engine queued.
+        gate.cancel() // Shutdown is queued behind that engine start.
+        XCTAssertFalse(gate.finish(engineRequest), "Late success must not mark the model running")
+        let explicitRestart = gate.begin()
+        XCTAssertFalse(gate.finish(engineRequest), "Stale success must not consume a newer request")
+        XCTAssertTrue(gate.finish(explicitRestart))
+        XCTAssertFalse(gate.finish(explicitRestart), "Completion must only be accepted once")
+    }
+
     func route(xbox: Bool = true, inputRate: Double = 48000, outputRate: Double = 48000, channels: UInt32 = 1) throws -> OpaquePointer {
         try XCTUnwrap(DeckRouteCreate(inputRate, outputRate, 128, 128, channels, xbox))
     }

@@ -8,6 +8,9 @@
 #define TAPS 32
 #define PHASES 512
 #define MAX_CHANNELS 32
+#define TONE_ACTIVE UINT64_C(1)
+#define OUTPUT_MUTED UINT64_C(2)
+#define NEXT_COMMAND UINT64_C(4)
 #define LOAD(x) atomic_load_explicit(&(x), memory_order_relaxed)
 #define STORE(x, v) atomic_store_explicit(&(x), (v), memory_order_relaxed)
 #define ADD(x, v) atomic_fetch_add_explicit(&(x), (v), memory_order_relaxed)
@@ -25,7 +28,6 @@ struct DeckRoute {
     bool primed;
     float gain, outputRamp, fade, limiterGain, releaseCoefficient;
     _Atomic float inputGain, outputGain;
-    _Atomic bool mute;
     _Atomic float inputRMS, inputPeak, outputRMS, outputPeak, inputLeft, inputRight;
     _Atomic uint64_t inputClips, outputClips, limitedSamples;
     _Atomic uint64_t underruns, overruns, droppedFrames, resyncs;
@@ -76,7 +78,7 @@ DeckRoute *DeckRouteCreate(double inRate, double outRate, uint32_t inBuffer,
     DeckRoute *r = calloc(1, sizeof(*r));
     if (!r) return NULL;
     if (!atomic_is_lock_free(&r->written) || !atomic_is_lock_free(&r->inputGain) ||
-        !atomic_is_lock_free(&r->ppm) || !atomic_is_lock_free(&r->mute) || !atomic_is_lock_free(&r->buffered)) {
+        !atomic_is_lock_free(&r->ppm) || !atomic_is_lock_free(&r->toneCommand) || !atomic_is_lock_free(&r->buffered)) {
         free(r); return NULL;
     }
     r->nominalRatio = inRate / outRate;
@@ -90,7 +92,7 @@ DeckRoute *DeckRouteCreate(double inRate, double outRate, uint32_t inBuffer,
     if (!r->ring) { free(r); return NULL; }
     STORE(r->inputGain, 1);
     STORE(r->outputGain, xbox ? 0.001f : 0.1f);
-    STORE(r->mute, true);
+    STORE(r->toneCommand, OUTPUT_MUTED);
     r->limiterGain = 1;
     r->releaseCoefficient = (float)(1 - exp(-1 / (outRate * 0.1)));
     mach_timebase_info_data_t timebase;
@@ -119,10 +121,11 @@ void DeckRouteSetLevels(DeckRoute *r, float inGain, float outDB) {
     STORE(r->outputGain, (float)pow(10, clampd(db, -90, r->xbox ? -30 : 0) / 20));
 }
 static void finishTone(DeckRoute *r, uint64_t command) {
-    // A late completion cannot cancel a newer request. Generation and active
-    // flag share one atomic word; no callback/control-thread locks are needed.
-    if ((command & 1) && atomic_compare_exchange_strong(&r->toneCommand, &command, (command + 2) & ~UINT64_C(1))) {
-        STORE(r->mute, true);
+    // Publish cancellation and its mute latch together. A callback must never
+    // see an inactive tone with the previous unmuted state. The generation also
+    // prevents a late completion from canceling a newer request.
+    uint64_t finished = ((command + NEXT_COMMAND) & ~TONE_ACTIVE) | OUTPUT_MUTED;
+    if ((command & TONE_ACTIVE) && atomic_compare_exchange_strong(&r->toneCommand, &command, finished)) {
         STORE(r->toneFramesRemaining, 0);
     }
 }
@@ -131,20 +134,22 @@ void DeckRouteCancelTone(DeckRoute *r) {
     finishTone(r, command);
 }
 void DeckRouteSetMuted(DeckRoute *r, bool mute) {
-    if (mute) { STORE(r->mute, true); DeckRouteCancelTone(r); }
-    else STORE(r->mute, false);
+    if (mute) {
+        atomic_fetch_or(&r->toneCommand, OUTPUT_MUTED);
+        DeckRouteCancelTone(r);
+    } else atomic_fetch_and(&r->toneCommand, ~OUTPUT_MUTED);
 }
 void DeckRouteSetGain(DeckRoute *r, float inGain, float outDB, bool mute) {
     DeckRouteSetLevels(r, inGain, outDB);
     DeckRouteSetMuted(r, mute);
 }
 bool DeckRouteStartTone(DeckRoute *r) {
-    if (!r->xbox || LOAD(r->mute) || !LOAD(r->ready)) return false;
+    if (!r->xbox || !LOAD(r->ready)) return false;
     uint64_t command = atomic_load_explicit(&r->toneCommand, memory_order_acquire);
-    if (command & 1) return false;
+    if (command & (TONE_ACTIVE | OUTPUT_MUTED)) return false;
     STORE(r->outputGain, fminf(LOAD(r->outputGain), 0.001f));
     STORE(r->toneDeadline, mach_continuous_time() + r->toneDurationTicks);
-    return atomic_compare_exchange_strong(&r->toneCommand, &command, command + 3);
+    return atomic_compare_exchange_strong(&r->toneCommand, &command, (command + NEXT_COMMAND) | TONE_ACTIVE);
 }
 void DeckRouteBypass(DeckRoute *r) { DeckRouteCancelTone(r); STORE(r->inputGain, 1); }
 
@@ -223,7 +228,7 @@ void DeckRoutePull(DeckRoute *r, float *left, float *right, uint32_t frames) {
     }
     float target = LOAD(r->inputGain);
     uint64_t command = atomic_load_explicit(&r->toneCommand, memory_order_acquire);
-    if ((command & 1) && mach_continuous_time() >= LOAD(r->toneDeadline)) finishTone(r, command);
+    if ((command & TONE_ACTIVE) && mach_continuous_time() >= LOAD(r->toneDeadline)) finishTone(r, command);
     if (command != r->seenToneCommand) { r->tonePosition = 0; r->seenToneCommand = command; }
     float slew = (float)(1 - exp(-1 / (r->outputRate * 0.01)));
     float peak = 0;
@@ -237,8 +242,11 @@ void DeckRoutePull(DeckRoute *r, float *left, float *right, uint32_t frames) {
         float blend = (float)(phase - p);
         float samples[2] = {0, 0};
         float signalPeak = 0;
-        bool tone = (command & 1) && command == atomic_load_explicit(&r->toneCommand, memory_order_acquire);
-        bool mute = LOAD(r->mute);
+        uint64_t state = atomic_load_explicit(&r->toneCommand, memory_order_acquire);
+        bool tone = (command & TONE_ACTIVE) && command == state;
+        // A command arriving mid-buffer takes effect as silence until the next
+        // callback initializes its tone position; never substitute live mic.
+        bool mute = (state & OUTPUT_MUTED) || state != command;
         if (tone && mute) { finishTone(r, command); tone = false; }
         for (uint32_t ch = 0; ch < r->channels; ++ch) {
             float v = 0;
@@ -305,7 +313,8 @@ DeckSnapshot DeckRouteSnapshot(DeckRoute *r) {
     SNAP(limiterReductionDB); SNAP(limiterFrames); SNAP(toneFrames); SNAP(toneFramesRemaining);
 #undef SNAP
     s.bufferedFrames = LOAD(r->buffered); s.targetFrames = r->target; s.correctionPPM = LOAD(r->ppm);
-    s.muted = LOAD(r->mute); s.toneActive = (LOAD(r->toneCommand) & 1) != 0;
+    uint64_t state = atomic_load_explicit(&r->toneCommand, memory_order_acquire);
+    s.muted = (state & OUTPUT_MUTED) != 0; s.toneActive = (state & TONE_ACTIVE) != 0;
     if (!s.toneActive) s.toneFramesRemaining = 0;
     return s;
 }
