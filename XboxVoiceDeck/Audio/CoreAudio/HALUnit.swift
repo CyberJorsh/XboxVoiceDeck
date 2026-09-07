@@ -69,7 +69,9 @@ final class HALUnit {
     }
 
     func attach(context: UnsafeMutableRawPointer) throws {
-        let callback = DeckMakeCallback(capture, context)
+        try attach(callback: DeckMakeCallback(capture, context))
+    }
+    func attach(callback: AURenderCallbackStruct) throws {
         try set(capture ? kAudioOutputUnitProperty_SetInputCallback : kAudioUnitProperty_SetRenderCallback,
                 scope: capture ? kAudioUnitScope_Global : kAudioUnitScope_Input, bus: 0, value: callback)
         try checkAudio(AudioUnitInitialize(unit), "Initialize selected AUHAL")

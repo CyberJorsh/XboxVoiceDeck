@@ -9,7 +9,6 @@ xcrun swiftc -O -target arm64-apple-macosx14.0 \
   -import-objc-header XboxVoiceDeck/Support/BridgingHeader.h -I XboxVoiceDeck/Audio/Realtime \
   XboxVoiceDeck/Audio/Devices/AudioDeviceManager.swift XboxVoiceDeck/Audio/CoreAudio/HALUnit.swift \
   XboxVoiceDeck/Models/RoutingConfiguration.swift XboxVoiceDeck/Settings/CalibrationStore.swift \
-  XboxVoiceDeck/App/DeckServices.swift \
   XboxVoiceDeck/Audio/Routing/AudioRoutingEngine.swift \
   tools/RoutingProbe/Arguments.swift tools/RoutingProbe/Validation.swift \
   tools/RoutingProbe/ArgumentTests.swift tools/RoutingProbe/main.swift \

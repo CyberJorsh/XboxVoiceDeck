@@ -57,6 +57,38 @@ final class ReadinessUITests: XCTestCase {
         XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
     }
 
+    func testBothInputButtonsMeterIndependentlyAndStop() {
+        launch()
+        for role in ["headsetMic", "xboxInput"] {
+            let button = app.buttons["endpoint.test.\(role)"]
+            visible(button); button.click()
+            waitText("endpoint.status.\(role)", contains: "Reading input")
+            XCTAssertTrue(app.progressIndicators["endpoint.meter.\(role)"].exists)
+            XCTAssertFalse(app.buttons["routing.startStop"].isEnabled)
+            let stop = app.buttons["endpoint.stop.\(role)"]
+            visible(stop); stop.click()
+            waitText("endpoint.status.\(role)", contains: "Test stopped")
+            XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
+        }
+    }
+
+    func testBothOutputButtonsRequireConfirmationAndFinishWithoutRouting() {
+        launch()
+        for role in ["headsetOutput", "xboxOutput"] {
+            let button = app.buttons["endpoint.test.\(role)"]
+            visible(button); button.click()
+            let dialog = app.windows["Xbox Voice Deck"].sheets.firstMatch
+            XCTAssertTrue(dialog.waitForExistence(timeout: 3))
+            dialog.buttons["Cancel"].click()
+            XCTAssertFalse(app.buttons["endpoint.stop.\(role)"].exists)
+            visible(button); button.click()
+            let confirm = dialog.buttons["Play quiet test"]
+            XCTAssertTrue(confirm.waitForExistence(timeout: 3)); confirm.click()
+            waitText("endpoint.status.\(role)", contains: "Test finished")
+            XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
+        }
+    }
+
     func testPermissionDeniedStaysStopped() {
         launch("denied")
         app.buttons["routing.startStop"].click()

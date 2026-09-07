@@ -6,7 +6,10 @@ import OSLog
 @MainActor
 final class DeckModel: ObservableObject {
     @Published var devices: [AudioEndpoint] = []
-    @Published var configuration = RoutingConfiguration()
+    @Published var configuration = RoutingConfiguration() {
+        didSet { endpointTests.validate(devices: devices, configuration: configuration, captureAllowed: microphoneAuthorization == .authorized) }
+    }
+    let endpointTests: EndpointTestModel
     @Published var status = "STOPPED — select four endpoints"
     @Published var error: String?
     @Published var running = false
@@ -60,6 +63,7 @@ final class DeckModel: ObservableObject {
     init(services: DeckServices = .live()) {
         self.services = services
         self.engine = services.engine
+        self.endpointTests = EndpointTestModel(engine: services.endpointTester, now: services.now)
         self.microphoneAuthorization = services.authorization()
         self.calibrationStore = CalibrationStore(defaults: services.defaults)
         Logger.audio.info("Application launch")
@@ -79,10 +83,10 @@ final class DeckModel: ObservableObject {
         }
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             // Termination must synchronously silence/dispose the live session.
-            MainActor.assumeIsolated { self?.engine.stopSynchronously() }
+            MainActor.assumeIsolated { self?.endpointTests.shutdown(); self?.engine.stopSynchronously() }
         }
         inactivityObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.cancelTone() }
+            Task { @MainActor in self?.cancelTone(); self?.endpointTests.stop("Test stopped: app inactive.") }
         }
         activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.refreshMicrophoneAuthorization() }
@@ -95,6 +99,7 @@ final class DeckModel: ObservableObject {
     }
 
     func handleSleep() {
+        endpointTests.stop("Test stopped: Mac sleeping.")
         cancelTone()
         if running || busy { stop(reason: "STOPPED — Mac sleeping; restart explicitly") }
     }
@@ -107,6 +112,7 @@ final class DeckModel: ObservableObject {
                 Logger.audio.info("Device inventory, rate, buffer or jack state changed")
                 devices = updated
             }
+            endpointTests.validate(devices: updated, configuration: configuration, captureAllowed: microphoneAuthorization == .authorized)
             let ids = updated.map(\.id)
             if watchedIDs != ids || watchedIDs.isEmpty {
                 watchedIDs = ids
@@ -122,12 +128,13 @@ final class DeckModel: ObservableObject {
             }
         } catch {
             self.error = error.localizedDescription
+            endpointTests.stop("AUDIO ERROR: device enumeration failed.")
             if running { stop(reason: "AUDIO ERROR — device enumeration failed") }
         }
     }
 
     func start() {
-        guard !busy, !running, !permissionRequestPending else { return }
+        guard !busy, !running, !permissionRequestPending, !endpointTests.busy else { return }
         refreshMicrophoneAuthorization()
         error = nil
         do { _ = try configuration.resolve(in: devices) }
@@ -185,6 +192,7 @@ final class DeckModel: ObservableObject {
         let current = services.authorization()
         guard current != microphoneAuthorization else { return }
         microphoneAuthorization = current
+        endpointTests.validate(devices: devices, configuration: configuration, captureAllowed: current == .authorized)
         Logger.audio.info("Microphone authorization changed: \(current.rawValue)")
         if current != .authorized && running {
             error = "Microphone permission is no longer granted. Both routes have been stopped."
@@ -247,6 +255,7 @@ final class DeckModel: ObservableObject {
         }
     }
     func stop(reason: String = "STOPPED") {
+        endpointTests.stop()
         guard !stopping else { return }
         startGate.cancel()
         sessionGeneration &+= 1
@@ -263,6 +272,7 @@ final class DeckModel: ObservableObject {
         }
     }
     func bypass() {
+        endpointTests.stop("Test stopped by Bypass All.")
         cancelTone()
         micGain = 1
         engine.bypass()
@@ -279,6 +289,7 @@ final class DeckModel: ObservableObject {
         engine.levels(micGain: Float(micGain), xboxDB: Float(xboxDB), headphoneDB: Float(headphoneDB))
     }
     func pollMeters() {
+        endpointTests.poll()
         guard running, !busy, !snapshotPending else { return }
         snapshotPending = true
         let generation = sessionGeneration
@@ -321,6 +332,29 @@ final class DeckModel: ObservableObject {
     func openMicrophoneSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") { NSWorkspace.shared.open(url) }
     }
+    func prepareEndpointTest(_ role: EndpointRole) -> EndpointTestRequest? {
+        guard !running, !busy, !permissionRequestPending, !endpointTests.busy else { return nil }
+        refreshMicrophoneAuthorization()
+        if role.input && microphoneAuthorization != .authorized {
+            requestMicrophoneAccess()
+            if microphoneAuthorization == .notDetermined { status = "Grant microphone access, then click Test input again." }
+            return nil
+        }
+        do { return try EndpointTestRequest(role: role, configuration: configuration, devices: devices) }
+        catch { self.error = error.localizedDescription; return nil }
+    }
+    func startEndpointTest(_ request: EndpointTestRequest) {
+        guard !running, !busy, !permissionRequestPending, !endpointTests.busy else { return }
+        refreshMicrophoneAuthorization()
+        do {
+            let current = try EndpointTestRequest(role: request.role, configuration: configuration, devices: devices)
+            guard current == request, !request.role.input || microphoneAuthorization == .authorized else {
+                throw AudioFailure("Endpoint or permission changed. Request the test again.")
+            }
+            error = nil
+            endpointTests.start(request)
+        } catch { self.error = error.localizedDescription }
+    }
     func latency(outgoing: Bool) -> String {
         guard activeEndpoints.count == 4 else { return "Start routing to estimate latency" }
         let input = activeEndpoints[outgoing ? 0 : 2]
@@ -345,6 +379,7 @@ final class DeckModel: ObservableObject {
             lines.append("Configured \(roles[index]): \(selection)")
         }
         lines.append("Configured channels: mic \(configuration.micChannel + 1), Xbox first \(configuration.xboxFirstChannel + 1), \(configuration.xboxStereo ? "stereo" : "mono"); requested buffer \(configuration.requestedBuffer)")
+        lines.append("Endpoint test: \(endpointTests.request?.role.title ?? "none"); \(endpointTests.message); callbacks \(endpointTests.reading.callbacks), peak \(endpointTests.reading.peak), error \(endpointTests.reading.error)")
         for device in devices {
             lines += ["\n\(device.name) — \(device.manufacturer)", device.summary,
                       "Rates: \(device.supportedRates); clock domain \(device.clockDomain)",

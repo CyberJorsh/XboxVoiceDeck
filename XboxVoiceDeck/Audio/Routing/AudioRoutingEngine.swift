@@ -2,6 +2,20 @@ import Foundation
 import AudioToolbox
 import OSLog
 
+// The model coordinates lifecycle on the main actor. Engines deliver completions
+// on the main queue; only the live engine owns Audio Units and its control queue.
+protocol DeckRoutingEngine: AnyObject {
+    func start(_ configuration: RoutingConfiguration, completion: @escaping (Result<[AudioEndpoint], Error>) -> Void)
+    func stop(completion: @escaping ([String]) -> Void)
+    func levels(micGain: Float, xboxDB: Float, headphoneDB: Float)
+    func mute(_ muted: Bool, outgoing: Bool)
+    func startTone(expected: CalibrationContext, completion: @escaping (Result<Void, Error>) -> Void)
+    func cancelTone()
+    func bypass()
+    func snapshot(completion: @escaping (RoutingSnapshot?) -> Void)
+    func stopSynchronously()
+}
+
 struct RoutingSnapshot {
     var outgoing = DeckSnapshot()
     var incoming = DeckSnapshot()
