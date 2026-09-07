@@ -17,7 +17,7 @@ struct PreflightView: View {
     ]
     private var preflight: RoutingPreflight {
         RoutingPreflight(configuration: model.configuration, devices: model.devices, permission: model.microphoneAuthorization,
-            observations: observations)
+            observations: observations, defaultOutput: model.defaultOutput, alertOutput: model.alertOutput)
     }
     var body: some View {
         ScrollView {

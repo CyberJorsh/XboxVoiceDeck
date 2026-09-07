@@ -10,7 +10,7 @@ enum UITestFixture {
         let scenario = environment["XVD_UI_SCENARIO"] ?? "ready"
         let inventory = scenario == "missing" || scenario.hasPrefix("permission-") ? [] : endpoints
         let permission = FixtureMicrophonePermission(scenario: scenario)
-        let engine = FixtureRoutingEngine(endpoints: inventory)
+        let engine = FixtureRoutingEngine(endpoints: inventory, holdStart: scenario == "startup-pending")
         let suite = "com.justjorshin.XboxVoiceDeck.UITestFixture"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
@@ -20,7 +20,9 @@ enum UITestFixture {
                 completion(permission.value == .authorized)
             },
             now: { ProcessInfo.processInfo.systemUptime }, defaults: defaults, watcher: nil,
-            runtimeEvents: true, simulated: true, endpointTester: FixtureEndpointTester()))
+            runtimeEvents: true, simulated: true, endpointTester: FixtureEndpointTester(), discover: scenario == "system-output" ? { completion in
+                completion(.success(DeviceInventory(devices: inventory, defaultOutput: 9002, alertOutput: 9002)))
+            } : nil))
         model.configuration = configuration
         model.status = "SIMULATED TEST SESSION — no hardware audio"
         return model
@@ -74,8 +76,10 @@ private final class FixtureRoutingEngine: DeckRoutingEngine {
     private var toneActive = false
     private var toneDeadline: TimeInterval = 0
     private var callbacks: UInt64 = 0
-    init(endpoints: [AudioEndpoint]) { self.endpoints = endpoints }
+    let holdStart: Bool
+    init(endpoints: [AudioEndpoint], holdStart: Bool = false) { self.endpoints = endpoints; self.holdStart = holdStart }
     func start(_ configuration: RoutingConfiguration, completion: @escaping (Result<[AudioEndpoint], Error>) -> Void) {
+        if holdStart { return } // Simulate a pending driver call without opening hardware.
         do {
             let selected = try configuration.resolve(in: endpoints)
             running = true; outgoingMuted = true; incomingMuted = true

@@ -1,5 +1,6 @@
 import CoreAudio
 import Foundation
+import OSLog
 
 struct AudioFailure: LocalizedError {
     let message: String
@@ -101,61 +102,105 @@ enum AudioDeviceManager {
 
     static func enumerate() throws -> [AudioEndpoint] {
         let ids = try array(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices, AudioDeviceID.self)
-        return try ids.map { id in
-            let range = try? scalar(id, kAudioDevicePropertyBufferFrameSizeRange, AudioValueRange())
-            let rates = (try? array(id, kAudioDevicePropertyAvailableNominalSampleRates, AudioValueRange.self)) ?? []
-            func u32(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope) -> UInt32? {
-                try? scalar(id, selector, UInt32(0), scope: scope)
-            }
-            return AudioEndpoint(
-                id: id, uid: string(id, kAudioDevicePropertyDeviceUID) ?? "unavailable:\(id)",
-                name: string(id, kAudioObjectPropertyName) ?? "Unnamed device \(id)",
-                manufacturer: string(id, kAudioObjectPropertyManufacturer) ?? "Unknown",
-                inputChannels: try channels(id, scope: input), outputChannels: try channels(id, scope: output),
-                sampleRate: (try? scalar(id, kAudioDevicePropertyNominalSampleRate, Double(0))) ?? 0,
-                bufferFrames: (try? scalar(id, kAudioDevicePropertyBufferFrameSize, UInt32(0))) ?? 0,
-                bufferRange: range.map { UInt32(max(0, $0.mMinimum))...UInt32(max(0, $0.mMaximum)) },
-                supportedRates: rates.map { $0.mMinimum == $0.mMaximum ? "\(Int($0.mMinimum))" : "\(Int($0.mMinimum))–\(Int($0.mMaximum))" }.joined(separator: ", "),
-                alive: u32(kAudioDevicePropertyDeviceIsAlive, global) == 1,
-                clockDomain: u32(kAudioDevicePropertyClockDomain, global) ?? 0,
-                inputLatency: u32(kAudioDevicePropertyLatency, input) ?? 0,
-                outputLatency: u32(kAudioDevicePropertyLatency, output) ?? 0,
-                inputSafety: u32(kAudioDevicePropertySafetyOffset, input) ?? 0,
-                outputSafety: u32(kAudioDevicePropertySafetyOffset, output) ?? 0,
-                inputStreamLatency: streamLatency(id, scope: input), outputStreamLatency: streamLatency(id, scope: output),
-                inputSource: u32(kAudioDevicePropertyDataSource, input), outputSource: u32(kAudioDevicePropertyDataSource, output),
-                inputJack: u32(kAudioDevicePropertyJackIsConnected, input), outputJack: u32(kAudioDevicePropertyJackIsConnected, output))
-        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let result = inspect(ids: ids, read: endpoint)
+        for issue in result.issues { Logger.audio.error("\(issue, privacy: .public)") }
+        return result.devices
     }
 
-    static func setBuffer(_ frames: UInt32, device: AudioEndpoint) throws {
-        guard device.bufferFrames != frames else { return }
+    static func inspect(ids: [AudioDeviceID], read: (AudioDeviceID) throws -> AudioEndpoint) -> DeviceInventory {
+        var inventory = DeviceInventory(devices: [])
+        for id in ids {
+            do { inventory.devices.append(try read(id)) }
+            catch { inventory.issues.append("Device \(id) unavailable: \(error.localizedDescription)") }
+        }
+        inventory.devices.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        return inventory
+    }
+
+    static func inventory() throws -> DeviceInventory {
+        let ids = try array(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDevices, AudioDeviceID.self)
+        var result = inspect(ids: ids, read: endpoint)
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        result.defaultOutput = try? scalar(system, kAudioHardwarePropertyDefaultOutputDevice, AudioDeviceID(0))
+        result.alertOutput = try? scalar(system, kAudioHardwarePropertyDefaultSystemOutputDevice, AudioDeviceID(0))
+        return result
+    }
+
+    static func endpoint(_ id: AudioDeviceID) throws -> AudioEndpoint {
+        guard let uid = string(id, kAudioDevicePropertyDeviceUID), !uid.isEmpty else {
+            throw AudioFailure("Stable device identity is unavailable. Reconnect the device and refresh.")
+        }
+        let range = try? scalar(id, kAudioDevicePropertyBufferFrameSizeRange, AudioValueRange())
+        let rates = (try? array(id, kAudioDevicePropertyAvailableNominalSampleRates, AudioValueRange.self)) ?? []
+        func u32(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope) -> UInt32? {
+            try? scalar(id, selector, UInt32(0), scope: scope)
+        }
+        return AudioEndpoint(
+            id: id, uid: uid,
+            name: string(id, kAudioObjectPropertyName) ?? "Unnamed device \(id)",
+            manufacturer: string(id, kAudioObjectPropertyManufacturer) ?? "Unknown",
+            inputChannels: try channels(id, scope: input), outputChannels: try channels(id, scope: output),
+            sampleRate: (try? scalar(id, kAudioDevicePropertyNominalSampleRate, Double(0))) ?? 0,
+            bufferFrames: (try? scalar(id, kAudioDevicePropertyBufferFrameSize, UInt32(0))) ?? 0,
+            bufferRange: range.map { UInt32(max(0, $0.mMinimum))...UInt32(max(0, $0.mMaximum)) },
+            supportedRates: rates.map { $0.mMinimum == $0.mMaximum ? "\(Int($0.mMinimum))" : "\(Int($0.mMinimum))–\(Int($0.mMaximum))" }.joined(separator: ", "),
+            alive: u32(kAudioDevicePropertyDeviceIsAlive, global) == 1,
+            clockDomain: u32(kAudioDevicePropertyClockDomain, global) ?? 0,
+            inputLatency: u32(kAudioDevicePropertyLatency, input) ?? 0,
+            outputLatency: u32(kAudioDevicePropertyLatency, output) ?? 0,
+            inputSafety: u32(kAudioDevicePropertySafetyOffset, input) ?? 0,
+            outputSafety: u32(kAudioDevicePropertySafetyOffset, output) ?? 0,
+            inputStreamLatency: streamLatency(id, scope: input), outputStreamLatency: streamLatency(id, scope: output),
+            inputSource: u32(kAudioDevicePropertyDataSource, input), outputSource: u32(kAudioDevicePropertyDataSource, output),
+            inputJack: u32(kAudioDevicePropertyJackIsConnected, input), outputJack: u32(kAudioDevicePropertyJackIsConnected, output))
+
+    }
+
+    static func setBuffer(_ frames: UInt32, device: AudioEndpoint, force: Bool = false) throws {
+        if !force, try scalar(device.id, kAudioDevicePropertyBufferFrameSize, UInt32(0)) == frames { return }
         var a = address(kAudioDevicePropertyBufferFrameSize)
         var settable: DarwinBoolean = false
         try checkAudio(AudioObjectIsPropertySettable(device.id, &a, &settable), "Check buffer control")
         guard settable.boolValue, device.bufferRange?.contains(frames) == true else {
             throw AudioFailure("\(device.name) cannot use \(frames) frames. Select ‘Keep hardware’ or a supported size.")
         }
-        var value = frames
-        try checkAudio(AudioObjectSetPropertyData(device.id, &a, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value), "Set buffer for \(device.name)")
-        let actual = try scalar(device.id, kAudioDevicePropertyBufferFrameSize, UInt32(0))
-        guard actual == frames else { throw AudioFailure("\(device.name) accepted \(actual), not the requested \(frames) frames. Select ‘Keep hardware’ to use it.") }
+        try BufferChange.waitForValue(frames, read: {
+            try scalar(device.id, kAudioDevicePropertyBufferFrameSize, UInt32(0))
+        }, write: {
+            var value = frames
+            try checkAudio(AudioObjectSetPropertyData(device.id, &a, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value), "Set buffer for \(device.name)")
+        }, subscribe: { signal in
+            // Register before writing; callbacks run independently of the waiting control queue.
+            var property = address(kAudioDevicePropertyBufferFrameSize)
+            let callback: AudioObjectPropertyListenerBlock = { _, _ in signal() }
+            let listenerQueue = DispatchQueue.global(qos: .userInitiated)
+            try checkAudio(AudioObjectAddPropertyListenerBlock(device.id, &property, listenerQueue, callback), "Watch buffer for \(device.name)")
+            return {
+                var property = address(kAudioDevicePropertyBufferFrameSize)
+                let status = AudioObjectRemovePropertyListenerBlock(device.id, &property, listenerQueue, callback)
+                if status != noErr { Logger.audio.error("Buffer listener removal failed: \(status)") }
+            }
+        }, requireNotification: force)
+
     }
 }
 
 // Notifications are delivered on the main queue. No listener touches audio buffers.
 final class AudioDeviceWatcher {
+    private let queue = DispatchQueue(label: "XboxVoiceDeck.device-listeners")
     private var registrations: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
     func watch(_ devices: [AudioEndpoint], onChange: @escaping () -> Void) {
-        clear()
-        add(AudioObjectID(kAudioObjectSystemObject), AudioDeviceManager.address(kAudioHardwarePropertyDevices), onChange)
-        for device in devices {
-            for selector in [kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyBufferFrameSize] {
-                add(device.id, AudioDeviceManager.address(selector), onChange)
-            }
-            for scope in [AudioDeviceManager.input, AudioDeviceManager.output] {
-                for selector in [kAudioDevicePropertyDataSource, kAudioDevicePropertyJackIsConnected, kAudioDevicePropertyStreamConfiguration] {
-                    add(device.id, AudioDeviceManager.address(selector, scope), onChange)
+        queue.async { [self] in
+            clearOnQueue()
+            add(AudioObjectID(kAudioObjectSystemObject), AudioDeviceManager.address(kAudioHardwarePropertyDevices), onChange)
+            for device in devices {
+                for selector in [kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyBufferFrameSize] {
+                    add(device.id, AudioDeviceManager.address(selector), onChange)
+                }
+                for scope in [AudioDeviceManager.input, AudioDeviceManager.output] {
+                    for selector in [kAudioDevicePropertyDataSource, kAudioDevicePropertyJackIsConnected, kAudioDevicePropertyStreamConfiguration] {
+                        add(device.id, AudioDeviceManager.address(selector, scope), onChange)
+                    }
                 }
             }
         }
@@ -166,12 +211,17 @@ final class AudioDeviceWatcher {
         let block: AudioObjectPropertyListenerBlock = { _, _ in onChange() }
         if AudioObjectAddPropertyListenerBlock(id, &a, .main, block) == noErr { registrations.append((id, a, block)) }
     }
-    func clear() {
+    func clear() { queue.async { [self] in clearOnQueue() } }
+    private func clearOnQueue() {
         for (id, property, block) in registrations {
             var a = property
             AudioObjectRemovePropertyListenerBlock(id, &a, .main, block)
         }
         registrations.removeAll()
     }
-    deinit { clear() }
+    deinit { clearOnQueue() }
+}
+
+extension Logger {
+    static let audio = Logger(subsystem: "com.justjorshin.XboxVoiceDeck", category: "Audio")
 }

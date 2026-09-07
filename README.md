@@ -7,17 +7,18 @@ A native Swift/SwiftUI macOS wired audio bridge for the HyperX Cloud III boom mi
 ## Implemented
 
 * A native Xcode app and hostless XCTest target; no package dependencies.
-* Core Audio device inventory with ID, channel counts, nominal/supported rates, buffer/range, manufacturer, clock domain, device/stream latency and safety offsets.
+* Background Core Audio device discovery with per-device error isolation and ID, channel counts, nominal/supported rates, buffer/range, manufacturer, clock domain, device/stream latency and safety offsets.
 * Four explicit endpoint selectors, stable UID selection persistence, mic channel choice and mono/stereo Xbox capture. No default-device fallback.
 * Independent **Test input** / **Test output** buttons beside all four selectors. Inputs show live meters for up to ten seconds without playback; outputs require confirmation and play a fixed quiet two-second tone. See [endpoint tests](docs/ENDPOINT_TESTS.md).
 * Two independent routes using four Apple AUHAL units. Each route has a preallocated C11 SPSC ring, windowed-sinc adaptive sample-rate converter, gain/mute, meters and buffer counters. Swift owns device/control/UI work; audio callbacks stay entirely in C.
 * 44.1 and 48 kHz device formats; Float32 internally, with one adaptive conversion per direction. 48 kHz is preferred but hardware rates are never changed silently.
-* Requested buffer sizes 32/64/128/256/512 frames, with range/readback checks and a “Keep hardware” option. 128 is the initial candidate; the lowest stable size requires hardware testing. Changes can affect other apps using that device.
+* Requested buffer sizes 32/64/128/256/512 frames, with range checks, asynchronous acknowledgement, reported rollback failures and a “Keep hardware” option. 128 is the initial candidate; the lowest stable size requires hardware testing. Changes can affect other apps using that device.
 * Both outputs start muted. Xbox gain starts at −60 dB, capped at −30 dB; an instant-attack/100 ms-release limiter and independent hard ceiling stay active. Headphone gain starts at −20 dB. Gain changes ramp.
 * Actual raw mic, Xbox input (including L/R), Xbox output and headphone output meters with held peaks/clip counts, queue fill, drift correction, underrun/overrun/drop/resync counters.
 * Bypass restores normal unity microphone input gain and preserves safe output gain. It cancels any calibration tone and latches Xbox mute; otherwise existing mutes are preserved. Cmd-Shift-B is **app-local**, not a global hotkey.
 * Dedicated calibration screen with 1 dB steps, limiter telemetry, confirmed two-second tone, reviewed device-specific profiles and a silent hardware-free safety check. See [CALIBRATION.md](docs/CALIBRATION.md).
-* Guided Preflight with endpoint/buffer/permission checks, a staged physical checklist and timestamped local JSON readiness reports. See [READINESS.md](docs/READINESS.md).
+* Immediate control-side mute/stop/bypass and cancellation of pending startup or tone requests, independent of the HAL control queue.
+* Guided Preflight with endpoint/buffer/permission checks, macOS output/alert warnings, mono capture and latency guidance, a staged physical checklist and timestamped local JSON readiness reports. See [READINESS.md](docs/READINESS.md).
 * Visible startup/callback errors, microphone permission handling, device/jack/rate/buffer invalidation with safe stop and explicit restart, copied diagnostics and local OSLog events. No microphone recordings.
 
 Read [Audio architecture](docs/AUDIO_ARCHITECTURE.md) for the decision made before implementation, alternatives, callback ownership, synchronization, drift strategy and limitations. Apple's [AUHAL technical note](https://developer.apple.com/library/archive/technotes/tn2091/_index.html) is the principal API reference.
@@ -42,6 +43,8 @@ open build/DerivedData/Build/Products/Debug/XboxVoiceDeck.app
 For an optimized build, run `bash scripts/build.sh Release`. The scripts honor `DEVELOPER_DIR`, then your selected full Xcode installation, with `/Applications/Xcode.app` as a fallback. Override it when needed, for example `DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer bash scripts/build.sh`.
 
 The project is checked in as plain Xcode project files; `python3 scripts/generate_project.py` regenerates them after adding source files. XcodeGen and Swift Package Manager are unnecessary. The Python generator is development tooling only; the app does not require Python. There are no submodules, secret configuration files or external packages needed to clone and build.
+
+For the next M1/Xbox test, use the [0.4.1 first-session checklist](docs/READINESS.md#first-session-with-041-6). Hardware acceptance remains pending.
 
 ## Hardware wiring and first run
 

@@ -65,6 +65,10 @@ Start with both app outputs muted, Xbox app output at **−60 dB**, and the adap
 
 The controller **headphone output → USB input** path also needs attention. Many cheap USB adapters expose a biased, mono microphone input, not a stereo line input. Controller headphone level can overload the adapter's ADC before app gain reduction. Begin with low controller headphone volume. Use appropriate attenuation or a stereo line-input interface if needed. Do not tie stereo left and right outputs together with a passive short; use a correctly designed summing adapter or capture one channel. Software cannot recover stereo from a mono adapter or undo analog clipping.
 
+## Keep other Mac audio off the controller microphone
+
+Before connecting the USB output to the controller mic branch, open **System Settings → Sound**. Set both **Output** and **Play sound effects through** to a destination other than that USB adapter. Check other audio applications too: they can select the adapter directly even when it is not the system default. Xbox Voice Deck cannot mute or limit those streams. The app warns when its Xbox output matches macOS's default or alert output, but absence of that warning is not electrical certification or proof that no other app uses the device.
+
 ## Phase 1 setup and physical acceptance checklist
 
 1. Leave the USB output disconnected from the controller mic branch until its level/interface suitability is checked. Connect the HyperX directly to the Mac.

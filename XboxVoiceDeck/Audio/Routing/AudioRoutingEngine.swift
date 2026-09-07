@@ -101,35 +101,51 @@ private final class RoutingSession {
     deinit { for error in shutdown() { Logger.audio.error("\(error, privacy: .public)") } }
 }
 
-extension Logger {
-    static let audio = Logger(subsystem: "com.justjorshin.XboxVoiceDeck", category: "Audio")
-}
-
-// All mutable state is private and confined to queue. Public methods enqueue
-// work; the sole synchronous entry is the application-termination barrier.
+// HAL ownership stays on the control queue. The separate gate makes safety
+// commands immediate even while that queue is waiting for a driver.
 final class AudioRoutingEngine: DeckRoutingEngine, @unchecked Sendable {
-    private let queue = DispatchQueue(label: "XboxVoiceDeck.audio-control", qos: .userInitiated)
+    private let queue: DispatchQueue
+    private let controls: RoutingControlGate
     private var session: RoutingSession?
-    private var originalBuffers: [(device: AudioEndpoint, requested: UInt32)] = []
+    private var originalBuffers: [(device: AudioEndpoint, requested: UInt32, uncertain: Bool)] = []
     private var toneWatchdog: DispatchWorkItem?
     private var toneID: UUID?
 
+    init(queue: DispatchQueue = DispatchQueue(label: "XboxVoiceDeck.audio-control", qos: .userInitiated),
+         controls: RoutingControlGate = RoutingControlGate()) {
+        self.queue = queue; self.controls = controls
+    }
+
     func start(_ configuration: RoutingConfiguration, completion: @escaping (Result<[AudioEndpoint], Error>) -> Void) {
+        let token = controls.begin()
         queue.async {
             do {
+                guard self.controls.accepts(token) else { throw AudioFailure("Startup cancelled.") }
                 let previousErrors = self.shutdown()
                 guard previousErrors.isEmpty else { throw AudioFailure(previousErrors.joined(separator: "\n")) }
                 let devices = try AudioDeviceManager.enumerate()
                 let selected = try configuration.resolve(in: devices)
                 if configuration.requestedBuffer != 0 {
                     for device in Dictionary(grouping: selected, by: \.uid).values.compactMap(\.first) {
-                        self.originalBuffers.append((device, configuration.requestedBuffer))
-                        try AudioDeviceManager.setBuffer(configuration.requestedBuffer, device: device)
+                        if device.bufferFrames != configuration.requestedBuffer {
+                            self.originalBuffers.append((device, configuration.requestedBuffer, false))
+                            do { try AudioDeviceManager.setBuffer(configuration.requestedBuffer, device: device) }
+                            catch {
+                                self.originalBuffers[self.originalBuffers.count - 1].uncertain = error is BufferChange.Unsettled
+                                throw error
+                            }
+                        }
+                        guard self.controls.accepts(token) else { throw AudioFailure("Startup cancelled.") }
                         Logger.audio.info("Buffer request \(configuration.requestedBuffer) for device \(device.id)")
                     }
                 }
                 let actual = try configuration.resolve(in: AudioDeviceManager.enumerate())
-                self.session = try RoutingSession(configuration: configuration, endpoints: actual)
+                guard self.controls.accepts(token) else { throw AudioFailure("Startup cancelled.") }
+                let session = try RoutingSession(configuration: configuration, endpoints: actual)
+                self.session = session
+                guard self.controls.attach(outgoing: session.outgoing!, incoming: session.incoming!, safety: session.safety, token: token) else {
+                    throw AudioFailure("Startup cancelled; both outputs stayed muted.")
+                }
                 Logger.audio.info("Routing started with explicit devices \(actual.map { String($0.id) }.joined(separator: ","), privacy: .public)")
                 DispatchQueue.main.async { completion(.success(actual)) }
             } catch {
@@ -141,6 +157,7 @@ final class AudioRoutingEngine: DeckRoutingEngine, @unchecked Sendable {
         }
     }
     func stop(completion: @escaping ([String]) -> Void = { _ in }) {
+        controls.stop()
         queue.async {
             let errors = self.shutdown()
             DispatchQueue.main.async { completion(errors) }
@@ -149,17 +166,21 @@ final class AudioRoutingEngine: DeckRoutingEngine, @unchecked Sendable {
     @discardableResult private func shutdown() -> [String] {
         toneWatchdog?.cancel(); toneWatchdog = nil
         toneID = nil
+        controls.detach()
         var errors = session?.shutdown() ?? []
         session = nil
         // Restore only our buffer change, and only if no other app changed it since.
-        if let live = try? AudioDeviceManager.enumerate() {
-            for record in originalBuffers {
-                let original = record.device
-                if let current = live.first(where: { $0.uid == original.uid }), current.bufferFrames == record.requested, current.bufferFrames != original.bufferFrames {
-                    do { try AudioDeviceManager.setBuffer(original.bufferFrames, device: current) }
-                    catch { errors.append("Buffer restore failed: \(error.localizedDescription)") }
+        for record in originalBuffers {
+            do {
+                let current = try AudioDeviceManager.endpoint(record.device.id)
+                guard current.uid == record.device.uid else { throw AudioFailure("Original device is missing; its buffer could not be restored.") }
+                if record.uncertain && current.bufferFrames != record.requested && current.bufferFrames != record.device.bufferFrames {
+                    throw AudioFailure("\(current.name) now reports a different buffer. Automatic rollback skipped to preserve an external change; check Audio MIDI Setup.")
                 }
-            }
+                if record.uncertain || (current.bufferFrames == record.requested && current.bufferFrames != record.device.bufferFrames) {
+                    try AudioDeviceManager.setBuffer(record.device.bufferFrames, device: current, force: record.uncertain)
+                }
+            } catch { errors.append("Buffer restore failed: \(error.localizedDescription)") }
         }
         originalBuffers.removeAll()
         Logger.audio.info("Routing stopped")
@@ -167,19 +188,11 @@ final class AudioRoutingEngine: DeckRoutingEngine, @unchecked Sendable {
         return errors
     }
     func levels(micGain: Float, xboxDB: Float, headphoneDB: Float) {
-        queue.async {
-            guard let session = self.session else { return }
-            DeckRouteSetLevels(session.outgoing!, micGain, xboxDB)
-            DeckRouteSetLevels(session.incoming!, 1, headphoneDB)
-        }
+        controls.levels(micGain: micGain, xboxDB: xboxDB, headphoneDB: headphoneDB)
     }
-    func mute(_ muted: Bool, outgoing: Bool) {
-        queue.async {
-            guard let session = self.session else { return }
-            DeckRouteSetMuted(outgoing ? session.outgoing! : session.incoming!, muted)
-        }
-    }
+    func mute(_ muted: Bool, outgoing: Bool) { controls.mute(muted, outgoing: outgoing) }
     func startTone(expected: CalibrationContext, completion: @escaping (Result<Void, Error>) -> Void) {
+        let token = controls.toneToken()
         queue.async { [self] in
             do {
                 guard let session = self.session, DeckSafetyError(session.safety) == 0 else { throw AudioFailure("Routing must be running without errors before a test tone.") }
@@ -189,7 +202,7 @@ final class AudioRoutingEngine: DeckRoutingEngine, @unchecked Sendable {
                       zip(resolved, session.endpoints).allSatisfy({ $0.runtimeSignature == $1.runtimeSignature }) else {
                     throw AudioFailure("Devices changed since tone confirmation. Check the setup and confirm again.")
                 }
-                guard DeckRouteStartTone(session.outgoing!) else { throw AudioFailure("Tone requires an unmuted, primed Xbox route and no other active tone.") }
+                guard controls.startTone(token: token) else { throw AudioFailure("Tone was cancelled or requires an unmuted, primed Xbox route and no other active tone.") }
                 self.toneWatchdog?.cancel()
                 let toneID = UUID()
                 self.toneID = toneID
@@ -209,14 +222,14 @@ final class AudioRoutingEngine: DeckRoutingEngine, @unchecked Sendable {
         }
     }
     func cancelTone() {
+        controls.cancelTone()
         queue.async {
             self.toneWatchdog?.cancel(); self.toneWatchdog = nil
             self.toneID = nil
-            if let route = self.session?.outgoing { DeckRouteCancelTone(route) }
         }
     }
     func bypass() {
-        queue.async { if let route = self.session?.outgoing { DeckRouteBypass(route) } }
+        controls.cancelTone(bypass: true)
     }
     func snapshot(completion: @escaping (RoutingSnapshot?) -> Void) {
         queue.async {
@@ -224,5 +237,5 @@ final class AudioRoutingEngine: DeckRoutingEngine, @unchecked Sendable {
             DispatchQueue.main.async { completion(snapshot) }
         }
     }
-    func stopSynchronously() { queue.sync { _ = shutdown() } }
+    func stopSynchronously() { controls.stop(); queue.sync { _ = shutdown() } }
 }
