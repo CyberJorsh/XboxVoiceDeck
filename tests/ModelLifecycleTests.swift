@@ -72,6 +72,8 @@ final class ModelLifecycleTests: XCTestCase {
 
     func testPermissionRefreshPublishesWithoutAnInventoryChangeOrAutoStart() {
         let h = Harness(permission: .denied)
+        h.model.requestMicrophoneAccess()
+        XCTAssertEqual(h.model.status, "PERMISSION DENIED")
         let inventory = h.model.devices
         var changes: [AVAuthorizationStatus] = []
         let token = h.model.$microphoneAuthorization.dropFirst().sink { changes.append($0) }
@@ -80,6 +82,8 @@ final class ModelLifecycleTests: XCTestCase {
         XCTAssertEqual(changes, [.authorized])
         XCTAssertEqual(h.model.devices, inventory)
         XCTAssertTrue(h.engine.starts.isEmpty)
+        XCTAssertNil(h.model.error)
+        XCTAssertTrue(h.model.status.hasPrefix("STOPPED"))
         withExtendedLifetime(token) {}
     }
 

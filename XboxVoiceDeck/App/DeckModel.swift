@@ -189,6 +189,9 @@ final class DeckModel: ObservableObject {
         if current != .authorized && running {
             error = "Microphone permission is no longer granted. Both routes have been stopped."
             stop(reason: "PERMISSION DENIED — restart explicitly after granting access")
+        } else if current == .authorized && !running && !busy && status.hasPrefix("PERMISSION ") {
+            error = nil
+            status = "STOPPED — microphone access granted; select your devices, then Start muted"
         }
     }
 
