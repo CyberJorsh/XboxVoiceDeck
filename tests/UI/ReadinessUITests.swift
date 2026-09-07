@@ -77,11 +77,12 @@ final class ReadinessUITests: XCTestCase {
         for role in ["headsetOutput", "xboxOutput"] {
             let button = app.buttons["endpoint.test.\(role)"]
             visible(button); button.click()
-            let cancel = app.buttons["Cancel"].firstMatch
-            XCTAssertTrue(cancel.waitForExistence(timeout: 3)); cancel.click()
+            let dialog = app.windows["Xbox Voice Deck"].sheets.firstMatch
+            XCTAssertTrue(dialog.waitForExistence(timeout: 3))
+            dialog.buttons["Cancel"].click()
             XCTAssertFalse(app.buttons["endpoint.stop.\(role)"].exists)
             visible(button); button.click()
-            let confirm = app.buttons["endpoint.confirm"]
+            let confirm = dialog.buttons["endpoint.confirm"]
             XCTAssertTrue(confirm.waitForExistence(timeout: 3)); confirm.click()
             waitText("endpoint.status.\(role)", contains: "Test finished")
             XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
