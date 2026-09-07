@@ -8,13 +8,17 @@ enum UITestFixture {
     @MainActor static func makeModel(environment: [String: String]) -> DeckModel? {
         guard environment["XVD_UI_TESTING"] == "1" else { return nil }
         let scenario = environment["XVD_UI_SCENARIO"] ?? "ready"
-        let inventory = scenario == "missing" ? [] : endpoints
+        let inventory = scenario == "missing" || scenario.hasPrefix("permission-") ? [] : endpoints
+        let permission = FixtureMicrophonePermission(scenario: scenario)
         let engine = FixtureRoutingEngine(endpoints: inventory)
         let suite = "com.justjorshin.XboxVoiceDeck.UITestFixture"
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
         let model = DeckModel(services: DeckServices(engine: engine, enumerate: { inventory },
-            authorization: { scenario == "denied" ? .denied : .authorized }, requestPermission: { $0(false) },
+            authorization: { permission.value }, requestPermission: { completion in
+                permission.value = scenario == "permission-request" ? .authorized : .denied
+                completion(permission.value == .authorized)
+            },
             now: { ProcessInfo.processInfo.systemUptime }, defaults: defaults, watcher: nil,
             runtimeEvents: true, simulated: true))
         model.configuration = configuration
@@ -33,6 +37,13 @@ enum UITestFixture {
             inputLatency: 0, outputLatency: 0, inputSafety: 0, outputSafety: 0,
             inputStreamLatency: 0, outputStreamLatency: 0, inputSource: nil, outputSource: nil,
             inputJack: 1, outputJack: 1)
+    }
+}
+
+private final class FixtureMicrophonePermission {
+    var value: AVAuthorizationStatus
+    init(scenario: String) {
+        value = scenario.hasPrefix("permission-") ? .notDetermined : scenario == "denied" ? .denied : .authorized
     }
 }
 

@@ -23,6 +23,101 @@ final class ModelLifecycleTests: XCTestCase {
         XCTAssertTrue(h.model.error?.contains("Privacy & Security") == true)
     }
 
+    func testExplicitPermissionRequestWorksWithoutDevicesAndNeverStartsAudio() async {
+        let h = Harness(permission: .notDetermined)
+        h.model.configuration = RoutingConfiguration()
+        h.model.start()
+        XCTAssertNotNil(h.model.error)
+        h.model.requestMicrophoneAccess()
+        h.model.requestMicrophoneAccess(); h.model.start()
+        XCTAssertEqual(h.permissionRequests.count, 1)
+        XCTAssertTrue(h.model.permissionRequestPending)
+        XCTAssertNil(h.model.error)
+        h.permission = .authorized
+        h.permissionRequests[0](true)
+        await Task { @MainActor in }.value
+        XCTAssertEqual(h.model.microphoneAuthorization, .authorized)
+        XCTAssertFalse(h.model.permissionRequestPending)
+        XCTAssertFalse(h.model.running)
+        XCTAssertTrue(h.model.xboxMuted); XCTAssertTrue(h.model.headphoneMuted)
+        XCTAssertTrue(h.engine.starts.isEmpty)
+    }
+
+    func testExplicitRequestWorksEvenWhenBufferConfigurationIsInvalid() async {
+        let h = Harness(permission: .notDetermined)
+        h.model.configuration.requestedBuffer = 96
+        h.model.requestMicrophoneAccess()
+        XCTAssertEqual(h.permissionRequests.count, 1)
+        h.permission = .authorized; h.permissionRequests[0](true)
+        await Task { @MainActor in }.value
+        h.model.start()
+        XCTAssertNotNil(h.model.error)
+        XCTAssertTrue(h.engine.starts.isEmpty)
+    }
+
+    func testDuplicateInputsDoNotHideTheIndependentPermissionAction() async {
+        let h = Harness(permission: .notDetermined)
+        h.model.configuration.headsetMicUID = "usb"
+        h.model.start()
+        XCTAssertTrue(h.permissionRequests.isEmpty)
+        XCTAssertTrue(h.model.error?.contains("Both currently select Synthetic usb") == true)
+        XCTAssertTrue(h.model.diagnostics.contains("Configured Headset microphone: Synthetic usb [2]"))
+        XCTAssertTrue(h.model.diagnostics.contains("Configured Xbox audio input: Synthetic usb [2]"))
+        h.model.requestMicrophoneAccess()
+        h.permission = .authorized; h.permissionRequests[0](true)
+        await Task { @MainActor in }.value
+        XCTAssertEqual(h.model.microphoneAuthorization, .authorized)
+        XCTAssertTrue(h.engine.starts.isEmpty)
+    }
+
+    func testPermissionRefreshPublishesWithoutAnInventoryChangeOrAutoStart() {
+        let h = Harness(permission: .denied)
+        let inventory = h.model.devices
+        var changes: [AVAuthorizationStatus] = []
+        let token = h.model.$microphoneAuthorization.dropFirst().sink { changes.append($0) }
+        h.permission = .authorized
+        h.model.refresh()
+        XCTAssertEqual(changes, [.authorized])
+        XCTAssertEqual(h.model.devices, inventory)
+        XCTAssertTrue(h.engine.starts.isEmpty)
+        withExtendedLifetime(token) {}
+    }
+
+    func testManualDeniedAndRestrictedRequestsDoNotReprompt() {
+        for permission in [AVAuthorizationStatus.denied, .restricted] {
+            let h = Harness(permission: permission)
+            h.model.requestMicrophoneAccess(); h.model.requestMicrophoneAccess()
+            XCTAssertTrue(h.permissionRequests.isEmpty)
+            XCTAssertTrue(h.engine.starts.isEmpty)
+            XCTAssertNotNil(h.model.error)
+            XCTAssertFalse(h.model.permissionRequestPending)
+        }
+    }
+
+    func testGrantCallbackCannotOverrideUnresolvedSystemAuthorization() async {
+        let h = Harness(permission: .notDetermined)
+        h.model.start()
+        h.permissionRequests[0](true)
+        await Task { @MainActor in }.value
+        XCTAssertTrue(h.engine.starts.isEmpty)
+        XCTAssertFalse(h.model.busy)
+        XCTAssertEqual(h.model.microphoneAuthorization, .notDetermined)
+        XCTAssertEqual(h.model.status, "PERMISSION NOT GRANTED")
+    }
+
+    func testPermissionRevocationStopsLiveRoutesAndGrantDoesNotResumeThem() {
+        let h = Harness(); h.start()
+        h.model.xboxMuted = false; h.model.headphoneMuted = false
+        h.permission = .denied
+        h.model.refreshMicrophoneAuthorization()
+        XCTAssertFalse(h.model.running)
+        XCTAssertTrue(h.model.xboxMuted); XCTAssertTrue(h.model.headphoneMuted)
+        XCTAssertEqual(h.engine.stops.count, 1)
+        h.permission = .authorized; h.model.refreshMicrophoneAuthorization()
+        XCTAssertFalse(h.model.running)
+        XCTAssertEqual(h.engine.starts.count, 1)
+    }
+
     func testPermissionGrantStartsOnceAndBothOutputsStayMuted() async {
         let h = Harness(permission: .notDetermined)
         h.model.xboxMuted = false; h.model.headphoneMuted = false
@@ -52,6 +147,7 @@ final class ModelLifecycleTests: XCTestCase {
         h.model.start()
         let denied = expectation(description: "Permission denial propagated")
         let token = h.model.$status.sink { if $0 == "PERMISSION DENIED" { denied.fulfill() } }
+        h.permission = .denied
         h.permissionRequests[0](false)
         await fulfillment(of: [denied], timeout: 1)
         withExtendedLifetime(token) {}

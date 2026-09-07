@@ -20,8 +20,21 @@ final class PreflightTests: XCTestCase {
     func testReadySoftwareNeverPassesPhysicalAcceptance() {
         let p = RoutingPreflight(configuration: configuration, devices: devices, permission: .authorized)
         XCTAssertTrue(p.canStartMuted)
-        XCTAssertEqual(p.checks.first { $0.id == "electrical" }?.status, .pending)
-        XCTAssertEqual(p.checks.first { $0.id == "boom" }?.status, .pending)
+        XCTAssertEqual(p.checks.first { $0.id == "electrical" }?.status, .manualRequired)
+        XCTAssertEqual(p.checks.first { $0.id == "boom" }?.status, .manualRequired)
+        XCTAssertFalse(p.checks.contains { $0.status == .pending })
+    }
+
+    func testManualObservationsAreSeparateFromAutomaticPasses() throws {
+        let observed = RoutingPreflight(configuration: configuration, devices: devices, permission: .authorized,
+            observations: ["wiring": "observed working", "boomMic": "problem found"])
+        XCTAssertEqual(observed.checks.first { $0.id == "electrical" }?.status, .userObserved)
+        XCTAssertEqual(observed.checks.first { $0.id == "boom" }?.status, .reportedProblem)
+        XCTAssertTrue(observed.canStartMuted, "Hardware observations must not prevent a muted diagnostic input test")
+        let decoded = try JSONDecoder().decode(RoutingPreflight.self, from: JSONEncoder().encode(observed))
+        XCTAssertEqual(decoded.checks, observed.checks)
+        let reset = RoutingPreflight(configuration: configuration, devices: devices, permission: .authorized)
+        XCTAssertEqual(reset.checks.first { $0.id == "electrical" }?.status, .manualRequired)
     }
     func testMonoInputRequiresExplicitMonoSelection() {
         let mono = [devices[0], usb(inputs: 1)]

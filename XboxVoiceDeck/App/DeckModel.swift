@@ -35,11 +35,13 @@ final class DeckModel: ObservableObject {
     @Published private(set) var offlineResult: OfflineSafetyResult?
     private let calibrationStore: CalibrationStore
     private let services: DeckServices
-    var microphoneAuthorization: AVAuthorizationStatus { services.authorization() }
+    @Published private(set) var microphoneAuthorization: AVAuthorizationStatus
+    @Published private(set) var permissionRequestPending = false
     var isSimulated: Bool { services.simulated }
     private var toneGeneration = 0
     private var toneRequestPending = false
     private var inactivityObserver: NSObjectProtocol?
+    private var activationObserver: NSObjectProtocol?
     private var sleepObserver: NSObjectProtocol?
     private let engine: DeckRoutingEngine
     private var meterTimer: Timer?
@@ -58,6 +60,7 @@ final class DeckModel: ObservableObject {
     init(services: DeckServices = .live()) {
         self.services = services
         self.engine = services.engine
+        self.microphoneAuthorization = services.authorization()
         self.calibrationStore = CalibrationStore(defaults: services.defaults)
         Logger.audio.info("Application launch")
         if let saved = services.defaults.data(forKey: "routing.phase1"),
@@ -81,6 +84,9 @@ final class DeckModel: ObservableObject {
         inactivityObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.cancelTone() }
         }
+        activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.refreshMicrophoneAuthorization() }
+        }
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 self?.handleSleep()
@@ -94,6 +100,7 @@ final class DeckModel: ObservableObject {
     }
 
     func refresh() {
+        refreshMicrophoneAuthorization()
         do {
             let updated = try services.enumerate()
             if devices != updated {
@@ -120,7 +127,8 @@ final class DeckModel: ObservableObject {
     }
 
     func start() {
-        guard !busy, !running else { return }
+        guard !busy, !running, !permissionRequestPending else { return }
+        refreshMicrophoneAuthorization()
         error = nil
         do { _ = try configuration.resolve(in: devices) }
         catch { self.error = error.localizedDescription; return }
@@ -130,11 +138,9 @@ final class DeckModel: ObservableObject {
         case .authorized: beginRouting(request: request)
         case .notDetermined:
             status = "Waiting for microphone permission"
-            services.requestPermission { [weak self] allowed in
-                Task { @MainActor in
-                    guard let self, self.startGate.accepts(request) else { return }
-                    if allowed { self.beginRouting(request: request) } else { self.permissionDenied(request: request) }
-                }
+            requestAuthorization { [weak self] allowed in
+                guard let self, self.startGate.accepts(request) else { return }
+                if allowed { self.beginRouting(request: request) } else { self.permissionDenied(request: request) }
             }
         default: permissionDenied(request: request)
         }
@@ -142,11 +148,77 @@ final class DeckModel: ObservableObject {
     private func permissionDenied(request: UUID) {
         guard startGate.finish(request) else { return }
         busy = false
-        status = "PERMISSION DENIED"
-        error = "Microphone access is required for both inputs. Open System Settings → Privacy & Security → Microphone and enable Xbox Voice Deck, then restart the app if requested."
+        showPermissionFailure()
+    }
+
+    // Permission is independent of device setup and must never start audio here.
+    func requestMicrophoneAccess() {
+        guard !permissionRequestPending, !busy, !running else { return }
+        refreshMicrophoneAuthorization()
+        switch microphoneAuthorization {
+        case .authorized: return
+        case .notDetermined:
+            error = nil
+            requestAuthorization { [weak self] allowed in
+                guard let self else { return }
+                if allowed {
+                    self.status = "STOPPED — microphone access granted; select your devices, then Start muted"
+                } else { self.showPermissionFailure() }
+            }
+        default: showPermissionFailure()
+        }
+    }
+
+    private func requestAuthorization(completion: @escaping (Bool) -> Void) {
+        permissionRequestPending = true
+        services.requestPermission { [weak self] allowed in
+            Task { @MainActor in
+                guard let self else { return }
+                self.permissionRequestPending = false
+                self.refreshMicrophoneAuthorization()
+                completion(allowed && self.microphoneAuthorization == .authorized)
+            }
+        }
+    }
+
+    func refreshMicrophoneAuthorization() {
+        let current = services.authorization()
+        guard current != microphoneAuthorization else { return }
+        microphoneAuthorization = current
+        Logger.audio.info("Microphone authorization changed: \(current.rawValue)")
+        if current != .authorized && running {
+            error = "Microphone permission is no longer granted. Both routes have been stopped."
+            stop(reason: "PERMISSION DENIED — restart explicitly after granting access")
+        }
+    }
+
+    private var permissionDescription: String {
+        switch microphoneAuthorization {
+        case .notDetermined: return "not requested"
+        case .authorized: return "granted"
+        case .denied: return "denied"
+        case .restricted: return "restricted"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func showPermissionFailure() {
+        switch microphoneAuthorization {
+        case .restricted:
+            status = "PERMISSION RESTRICTED"
+            error = "macOS restricts microphone access. Check Screen Time or administrator restrictions. The app cannot override this policy."
+        case .notDetermined:
+            status = "PERMISSION NOT GRANTED"
+            error = "macOS did not finish granting microphone access. Open the built XboxVoiceDeck.app (not its internal executable), check for a permission dialog, then Refresh permission. An app may not appear in Microphone settings until macOS processes its access request."
+        default:
+            status = "PERMISSION DENIED"
+            error = "Microphone access is required for both inputs. Open System Settings → Privacy & Security → Microphone and enable Xbox Voice Deck, then return and Refresh permission. Restart the app if macOS requests it."
+        }
     }
     private func beginRouting(request: UUID) {
         guard startGate.accepts(request) else { return }
+        refreshMicrophoneAuthorization()
+        guard microphoneAuthorization == .authorized else { permissionDenied(request: request); return }
         reviewedContext = nil
         xboxMuted = true; headphoneMuted = true; xboxDB = min(xboxDB, -60)
         status = "Starting explicit AUHAL routes…"
@@ -259,9 +331,17 @@ final class DeckModel: ObservableObject {
     var diagnostics: String {
         var lines = [isSimulated ? "SIMULATED TEST SESSION — no hardware audio or physical validation" : "Xbox Voice Deck — Phase 2 software; physical calibration pending", "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)",
                      "Architecture: \(machineValue("hw.machine")) · Model: \(machineValue("hw.model"))", status,
-                     "Format: Float32 at source device rate; one adaptive SRC per direction", "Permission: \(microphoneAuthorization.rawValue)",
+                     "Version: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown") (\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"))",
+                     "Format: Float32 at source device rate; one adaptive SRC per direction", "Permission: \(microphoneAuthorization.rawValue) (\(permissionDescription)); request pending: \(permissionRequestPending)",
                      "Xbox: \(xboxDB) dB, mute \(xboxMuted); Headphones: \(headphoneDB) dB, mute \(headphoneMuted)",
-                     "Selected IDs: \(activeEndpoints.map { String($0.id) }.joined(separator: ", "))"]
+                     "Active endpoint IDs: \(activeEndpoints.isEmpty ? "none" : activeEndpoints.map { String($0.id) }.joined(separator: ", "))"]
+        let roles = ["Headset microphone", "Headset output", "Xbox audio input", "Xbox mic output"]
+        for (index, uid) in configuration.selectedUIDs.enumerated() {
+            let selection = devices.first { $0.uid == uid }.map { "\($0.name) [\($0.id)]" }
+                ?? (uid.isEmpty ? "not selected" : "missing saved device")
+            lines.append("Configured \(roles[index]): \(selection)")
+        }
+        lines.append("Configured channels: mic \(configuration.micChannel + 1), Xbox first \(configuration.xboxFirstChannel + 1), \(configuration.xboxStereo ? "stereo" : "mono"); requested buffer \(configuration.requestedBuffer)")
         for device in devices {
             lines += ["\n\(device.name) — \(device.manufacturer)", device.summary,
                       "Rates: \(device.supportedRates); clock domain \(device.clockDomain)",

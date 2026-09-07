@@ -1,7 +1,17 @@
 import AVFoundation
 
 struct PreflightCheck: Codable, Identifiable, Equatable {
-    enum Status: String, Codable { case passed, blocked, pending }
+    enum Status: String, Codable {
+        case passed, blocked, pending, manualRequired, userObserved, reportedProblem
+        var label: String {
+            switch self {
+            case .manualRequired: return "MANUAL CHECK REQUIRED"
+            case .userObserved: return "USER OBSERVED"
+            case .reportedProblem: return "PROBLEM REPORTED"
+            default: return rawValue.uppercased()
+            }
+        }
+    }
     let id: String
     let title: String
     let status: Status
@@ -12,7 +22,8 @@ struct RoutingPreflight: Codable {
     let checks: [PreflightCheck]
     var canStartMuted: Bool { !checks.contains { $0.status == .blocked } }
 
-    init(configuration: RoutingConfiguration, devices: [AudioEndpoint], permission: AVAuthorizationStatus) {
+    init(configuration: RoutingConfiguration, devices: [AudioEndpoint], permission: AVAuthorizationStatus,
+         observations: [String: String] = [:]) {
         var result: [PreflightCheck] = []
         let roles = ["Headset microphone", "Headset output", "Xbox audio input", "Xbox microphone output"]
         for (index, uid) in configuration.selectedUIDs.enumerated() {
@@ -43,11 +54,19 @@ struct RoutingPreflight: Codable {
         result.append(PreflightCheck(id: "permission", title: "Microphone permission",
             status: authorized ? .passed : permission == .notDetermined ? .pending : .blocked,
             detail: authorized ? "macOS has granted capture access."
-                : permission == .notDetermined ? "Start muted will request access once. Both inputs require microphone permission."
-                : "Enable Xbox Voice Deck in System Settings → Privacy & Security → Microphone."))
-        result.append(PreflightCheck(id: "electrical", title: "Physical compatibility", status: .pending,
+                : permission == .notDetermined ? "Click Allow microphone access above. No device selection or audio startup is required."
+                : permission == .restricted ? "macOS policy restricts access. Check Screen Time or administrator restrictions."
+                : "Enable Xbox Voice Deck in System Settings → Privacy & Security → Microphone, then Refresh permission."))
+        func manualStatus(_ key: String) -> PreflightCheck.Status {
+            switch observations[key] {
+            case "observed working": return .userObserved
+            case "problem found": return .reportedProblem
+            default: return .manualRequired
+            }
+        }
+        result.append(PreflightCheck(id: "electrical", title: "Physical compatibility", status: manualStatus("wiring"),
             detail: "Verify the exact USB adapter, CTIA splitter, input level/channel count and controller mic attenuation/bias interface. Software cannot certify these."))
-        result.append(PreflightCheck(id: "boom", title: "Actual HyperX boom mic", status: .pending,
+        result.append(PreflightCheck(id: "boom", title: "Actual HyperX boom mic", status: manualStatus("boomMic"),
             detail: "With both outputs muted, speak and use the headset's physical mic mute. The selected input meter must follow that switch."))
         checks = result
     }

@@ -56,7 +56,7 @@ USB adapter → Mac USB-C
 
 Select all four endpoints and actual input channels. A device labelled “MacBook microphone” is not proof that the HyperX boom mic is selected. The Preflight tab checks software configuration and guides physical observations. Start muted, verify the two input meters independently, unmute headphones cautiously, then check outgoing microphone levels starting at −60 dB. The Calibration tab provides a confirmed low-level tone and reviewed profile restoration. Without devices, use the silent software safety check or `bash scripts/readiness_check.sh` for a Release build and preparation checks.
 
-The first valid start requests macOS microphone permission once. If denied, use **System Settings → Privacy & Security → Microphone → Xbox Voice Deck**. The app includes an explanatory button and does not repeatedly prompt. Both the headset capture and USB capture need permission. Rebuilding with a changed signing identity can require macOS permission approval again.
+Click **Allow microphone access** in Routing or Preflight before configuring devices. This requests macOS permission without opening audio streams or starting routing. Start muted also requests access if needed after validating the selected devices. If denied, use **System Settings → Privacy & Security → Microphone → Xbox Voice Deck**, then return to the app; **Refresh permission** checks again immediately. The app does not repeatedly prompt after denial. Both capture inputs need permission. Rebuilding with a changed signing identity can require macOS permission approval again. See [microphone permission troubleshooting](docs/MICROPHONE_PERMISSION.md) if the app is missing from Settings.
 
 ## Tests and diagnostics
 
