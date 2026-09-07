@@ -2,6 +2,7 @@ import SwiftUI
 
 struct DeckView: View {
     @ObservedObject var model: DeckModel
+    @State private var selectedTab = 0
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -11,7 +12,7 @@ struct DeckView: View {
                 }
                 Spacer()
                 Button(model.running ? "Stop routing" : "Start muted") { model.running ? model.stop() : model.start() }
-                    .disabled(model.busy).keyboardShortcut(.return, modifiers: .command)
+                    .disabled(model.busy || model.permissionRequestPending).keyboardShortcut(.return, modifiers: .command)
                     .accessibilityIdentifier("routing.startStop")
             }
             if model.isSimulated {
@@ -24,15 +25,19 @@ struct DeckView: View {
                     Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     Text(error).textSelection(.enabled).accessibilityIdentifier("routing.error")
                     Spacer()
-                    Button("Microphone settings") { model.openMicrophoneSettings() }
+                    Button("Review setup") { selectedTab = 1 }
+                        .accessibilityIdentifier("routing.reviewSetup")
+                    if model.microphoneAuthorization == .denied || model.microphoneAuthorization == .restricted {
+                        Button("Microphone settings") { model.openMicrophoneSettings() }
+                    }
                 }.padding(10).background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
             }
-            TabView {
-                routing.tabItem { Label("Routing", systemImage: "cable.connector") }
-                PreflightView(model: model).tabItem { Label("Preflight", systemImage: "checklist") }
-                levels.tabItem { Label("Meters & safety", systemImage: "waveform") }
-                CalibrationView(model: model).tabItem { Label("Calibration", systemImage: "slider.horizontal.3") }
-                diagnostics.tabItem { Label("Diagnostics", systemImage: "stethoscope") }
+            TabView(selection: $selectedTab) {
+                routing.tabItem { Label("Routing", systemImage: "cable.connector") }.tag(0)
+                PreflightView(model: model).tabItem { Label("Preflight", systemImage: "checklist") }.tag(1)
+                levels.tabItem { Label("Meters & safety", systemImage: "waveform") }.tag(2)
+                CalibrationView(model: model).tabItem { Label("Calibration", systemImage: "slider.horizontal.3") }.tag(3)
+                diagnostics.tabItem { Label("Diagnostics", systemImage: "stethoscope") }.tag(4)
             }
             HStack {
                 Text("Xbox incoming → headphones only. Mic → Xbox only. Sidetone off.").font(.caption).foregroundStyle(.secondary)
@@ -47,6 +52,7 @@ struct DeckView: View {
     private var routing: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                if model.microphoneAuthorization != .authorized { MicrophoneAccessView(model: model) }
                 Text("Select each physical endpoint. Nothing uses the system default automatically.").font(.headline)
                 endpoint("1. Headset microphone", selection: $model.configuration.headsetMicUID, input: true)
                 if let mic = model.devices.first(where: { $0.uid == model.configuration.headsetMicUID }) {

@@ -17,7 +17,10 @@ struct RoutingConfiguration: Codable, Equatable {
             throw AudioFailure("Choose Keep hardware or a 32/64/128/256/512-frame buffer request.")
         }
         guard !selectedUIDs.contains("") else { throw AudioFailure("Select all four endpoints explicitly.") }
-        guard headsetMicUID != xboxInputUID else { throw AudioFailure("Headset microphone and Xbox input must be different devices.") }
+        guard headsetMicUID != xboxInputUID else {
+            let name = devices.first { $0.uid == headsetMicUID }?.name ?? "the same saved input"
+            throw AudioFailure("Headset microphone and Xbox input must be different devices. Both currently select \(name). Set Xbox input to the controller's USB adapter and select a separate input that actually receives the HyperX boom mic.")
+        }
         guard headsetOutputUID != xboxOutputUID else { throw AudioFailure("Headset and Xbox outputs must be different devices to keep the paths isolated.") }
         let endpoints = try selectedUIDs.map { uid in
             guard let device = devices.first(where: { $0.uid == uid }) else { throw AudioFailure("MISSING: selected device \(uid). Reconnect it or select another endpoint.") }
@@ -31,7 +34,7 @@ struct RoutingConfiguration: Codable, Equatable {
         }
         guard micChannel >= 0, micChannel < endpoints[0].inputChannels,
               xboxFirstChannel >= 0, xboxFirstChannel + (xboxStereo ? 2 : 1) <= endpoints[2].inputChannels else {
-            throw AudioFailure("Selected input channels are unavailable. A mono USB mic input requires Mono mode.")
+            throw AudioFailure("Selected input channels are unavailable. For a mono USB mic input, turn off Stereo Xbox input in Routing and select its available channel.")
         }
         guard endpoints[1].outputChannels > 0, endpoints[3].outputChannels > 0 else { throw AudioFailure("Selected output has no output channels.") }
         guard endpoints.allSatisfy({ $0.inputChannels <= 32 && $0.outputChannels <= 32 }) else {

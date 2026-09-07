@@ -16,28 +16,30 @@ struct PreflightView: View {
         ("stability", "8. Run both directions for 30 minutes. Check counter changes, dropouts and latency.")
     ]
     private var preflight: RoutingPreflight {
-        RoutingPreflight(configuration: model.configuration, devices: model.devices, permission: model.microphoneAuthorization)
+        RoutingPreflight(configuration: model.configuration, devices: model.devices, permission: model.microphoneAuthorization,
+            observations: observations)
     }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Prepare your wired setup").font(.title2.bold())
                 Text("Check Routing first, then work through these checks. Passing software checks does not establish electrical compatibility or Xbox reception.")
+                MicrophoneAccessView(model: model)
                 Text(preflight.canStartMuted ? "Software preflight allows a muted start" : "Resolve the blocked checks before starting")
                     .font(.headline).accessibilityIdentifier("preflight.summary")
                 ForEach(preflight.checks) { check in
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: check.status == .passed ? "checkmark.circle" : check.status == .blocked ? "xmark.octagon" : "circle.dashed")
-                            .foregroundStyle(check.status == .passed ? .green : check.status == .blocked ? .red : .orange)
+                            .foregroundStyle(color(check.status))
                         VStack(alignment: .leading) {
-                            Text("\(check.title) · \(check.status.rawValue.uppercased())").font(.headline)
+                            Text("\(check.title) · \(check.status.label)").font(.headline)
                             Text(check.detail).font(.callout).foregroundStyle(.secondary)
                         }
                     }.accessibilityElement(children: .combine).accessibilityIdentifier("preflight.\(check.id)")
                 }
                 Divider()
-                Text("When the hardware arrives").font(.headline)
-                Text("These are your observations, not automatic test results. They reset when selections change and are included in the exported report. Physical acceptance stays pending.").font(.caption)
+                Text("Manual hardware checks").font(.headline)
+                Text("Physical compatibility and boom-mic identity never complete automatically. They do not block a muted input test. Record your observations below to update their labels; user observations are not software certification. They reset when selections change. Overall physical acceptance stays pending.").font(.caption)
                 ForEach(steps, id: \.0) { key, instruction in
                     VStack(alignment: .leading) {
                         Text(instruction)
@@ -46,6 +48,7 @@ struct PreflightView: View {
                             Text("Observed working").tag("observed working")
                             Text("Problem found").tag("problem found")
                         }.pickerStyle(.segmented).frame(maxWidth: 480)
+                            .accessibilityIdentifier("preflight.observation.\(key)")
                     }
                 }
                 HStack {
@@ -57,6 +60,14 @@ struct PreflightView: View {
         }
         .onChange(of: model.configuration) { _, _ in observations.removeAll(); exported = "" }
         .onChange(of: model.devices.map(\.runtimeSignature)) { _, _ in observations.removeAll(); exported = "" }
+    }
+    private func color(_ status: PreflightCheck.Status) -> Color {
+        switch status {
+        case .passed: return .green
+        case .blocked, .reportedProblem: return .red
+        case .userObserved: return .blue
+        default: return .orange
+        }
     }
     private func export() {
         let report = ReadinessReport(configuration: model.configuration, devices: model.devices, preflight: preflight,

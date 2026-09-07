@@ -31,10 +31,10 @@ The app has one control window. Closing it quits the app and invokes synchronous
 
 ## Use the app's Preflight tab
 
-1. In Routing, select the exact four endpoints and channels. Do not substitute defaults for a missing saved device.
+1. Click **Allow microphone access** in Routing or Preflight. This works before device selection and opens no audio streams. Then select the exact four endpoints and channels in Routing. Do not substitute defaults for a missing saved device.
 2. Open Preflight. It checks individual endpoint capabilities, separation, 44.1/48 kHz, buffer requests and permission status. Blocked software configuration is rejected before engine startup; device write/readback checks still occur at startup.
-3. Permission that has not yet been requested is shown as pending. Start muted requests it once when the endpoint configuration is valid. Permission denial remains a visible error.
-4. Electrical compatibility and actual boom-mic identity remain pending. Their checks require the physical setup and your observations.
+3. Permission that has not yet been requested is shown as pending beside its explicit request instructions. Permission changes refresh after the request, on returning to the app and during inventory refresh; **Refresh permission** is also available. Denial offers Settings instead of another system prompt.
+4. Electrical compatibility and actual boom-mic identity show **Manual check required**, not an automatic pending operation. Their checks require the physical setup and your observations. They do not block a muted input test. Recording an observation changes the label to **User observed** or **Problem reported**, never an automatic pass or electrical certification.
 5. Work through the staged hardware checklist only when the devices arrive. Record Not checked, Observed working or Problem found. Observations reset when selected configuration or device runtime signatures change. These are user statements, not automated acceptance results.
 6. Export a local readiness report before and after a test session. It includes timestamp, app version/build, detected Mac model/architecture, selected devices and UIDs, rates/buffers, runtime counters and observations. It contains no audio samples. Its `physicalAcceptance` remains `pending` in this preparation pass. Review identifiers before sharing.
 

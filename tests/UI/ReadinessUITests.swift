@@ -65,6 +65,30 @@ final class ReadinessUITests: XCTestCase {
         XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
     }
 
+    func testRequestPermissionFromSetupErrorWithoutAudioDevices() {
+        launch("permission-request")
+        app.buttons["routing.startStop"].click()
+        XCTAssertTrue(app.staticTexts["routing.error"].exists)
+        XCTAssertFalse(app.buttons["Microphone settings"].exists)
+        app.buttons["routing.reviewSetup"].click()
+        let allow = app.buttons["permission.request"]
+        visible(allow); allow.click()
+        waitText("permission.explanation", contains: "access granted")
+        waitText("routing.status", contains: "STOPPED")
+        XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
+        XCTAssertFalse(app.buttons["permission.request"].exists)
+    }
+
+    func testRefusedPermissionOffersSettingsWithoutStartingAudio() {
+        launch("permission-refused"); tab("Preflight")
+        let allow = app.buttons["permission.request"]
+        visible(allow); allow.click()
+        waitText("routing.status", contains: "PERMISSION DENIED")
+        XCTAssertTrue(app.buttons["permission.settings"].exists)
+        XCTAssertFalse(app.buttons["permission.request"].exists)
+        XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
+    }
+
     func testReadyPreflightAndMutedStartStop() {
         launch()
         tab("Preflight")
