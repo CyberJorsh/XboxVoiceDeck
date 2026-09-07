@@ -20,9 +20,9 @@ xcrun clang -O1 -g -std=gnu11 -fsanitize=thread -I XboxVoiceDeck/Audio/Realtime 
   -framework AudioToolbox -framework CoreAudio -o build/tests/clock-tsan
 build/tests/clock-tsan --threads-only
 for deck_sanitizer in none address,undefined thread; do
-  deck_flags=()
+  deck_flags=(-O1)
   if [ "$deck_sanitizer" != none ]; then deck_flags+=("-fsanitize=$deck_sanitizer"); fi
-  xcrun clang -O1 -g -std=gnu11 -Wall -Wextra -Werror "${deck_flags[@]}" -I XboxVoiceDeck/Audio/Realtime \
+  xcrun clang -g -std=gnu11 -Wall -Wextra -Werror "${deck_flags[@]}" -I XboxVoiceDeck/Audio/Realtime \
     XboxVoiceDeck/Audio/Realtime/DeckEndpointTest.c tests/EndpointStress.c \
     -framework AudioToolbox -framework CoreAudio -o "build/tests/endpoint-$deck_sanitizer"
   "build/tests/endpoint-$deck_sanitizer"
