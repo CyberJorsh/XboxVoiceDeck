@@ -7,9 +7,9 @@ xcrun clang -O2 -std=gnu11 -mmacosx-version-min=14.0 \
   -c XboxVoiceDeck/Audio/Realtime/DeckAudio.c -o build/routing-probe/DeckAudio.o
 xcrun swiftc -O -target arm64-apple-macosx14.0 \
   -import-objc-header XboxVoiceDeck/Support/BridgingHeader.h -I XboxVoiceDeck/Audio/Realtime \
-  XboxVoiceDeck/Audio/Devices/AudioDeviceManager.swift XboxVoiceDeck/Audio/CoreAudio/HALUnit.swift \
+  XboxVoiceDeck/Audio/Devices/BufferChange.swift XboxVoiceDeck/Audio/Devices/AudioDeviceManager.swift XboxVoiceDeck/Audio/CoreAudio/HALUnit.swift \
   XboxVoiceDeck/Models/RoutingConfiguration.swift XboxVoiceDeck/Settings/CalibrationStore.swift \
-  XboxVoiceDeck/Audio/Routing/AudioRoutingEngine.swift \
+  XboxVoiceDeck/Audio/Routing/RoutingControlGate.swift XboxVoiceDeck/Audio/Routing/AudioRoutingEngine.swift \
   tools/RoutingProbe/Arguments.swift tools/RoutingProbe/Validation.swift \
   tools/RoutingProbe/ArgumentTests.swift tools/RoutingProbe/main.swift \
   build/routing-probe/DeckAudio.o -framework AudioToolbox -framework CoreAudio -framework AVFoundation \

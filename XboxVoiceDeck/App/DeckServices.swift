@@ -20,11 +20,14 @@ struct DeckServices {
     let simulated: Bool
     var endpointTester: EndpointTesting = EndpointTestEngine()
 
+    var discover: ((@escaping (Result<DeviceInventory, Error>) -> Void) -> Void)? = nil
+
     static func live() -> DeckServices {
-        DeckServices(engine: AudioRoutingEngine(), enumerate: AudioDeviceManager.enumerate,
+        let discovery = DeviceDiscovery()
+        return DeckServices(engine: AudioRoutingEngine(), enumerate: AudioDeviceManager.enumerate,
             authorization: { AVCaptureDevice.authorizationStatus(for: .audio) },
             requestPermission: { AVCaptureDevice.requestAccess(for: .audio, completionHandler: $0) },
             now: { ProcessInfo.processInfo.systemUptime }, defaults: .standard,
-            watcher: AudioDeviceWatcher(), runtimeEvents: true, simulated: false)
+            watcher: AudioDeviceWatcher(), runtimeEvents: true, simulated: false, discover: discovery.discover)
     }
 }

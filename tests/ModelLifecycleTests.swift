@@ -4,6 +4,61 @@ import Combine
 
 @MainActor
 final class ModelLifecycleTests: XCTestCase {
+    func testPermissionRevocationDuringStartupCannotPublishConnected() {
+        for refreshBeforeCompletion in [false, true] {
+            let h = Harness()
+            h.model.start()
+            h.permission = .denied
+            if refreshBeforeCompletion { h.model.refreshMicrophoneAuthorization() }
+            h.completeStart()
+            XCTAssertFalse(h.model.running)
+            XCTAssertFalse(h.model.busy)
+            XCTAssertEqual(h.model.microphoneAuthorization, .denied)
+            XCTAssertEqual(h.engine.stops.count, 1)
+            XCTAssertTrue(h.model.xboxMuted); XCTAssertTrue(h.model.headphoneMuted)
+            XCTAssertTrue(h.model.status.contains("PERMISSION DENIED"))
+        }
+    }
+
+    func testDiscoveryCoalescesRequestsAndStopDoesNotWaitForResult() {
+        let h = Harness(asyncDiscovery: true)
+        XCTAssertEqual(h.discoveries.count, 1)
+        h.deliverInventory()
+        h.start()
+        h.model.refresh(); h.model.refresh()
+        XCTAssertEqual(h.discoveries.count, 2)
+        h.model.stop()
+        XCTAssertFalse(h.model.running)
+        XCTAssertEqual(h.engine.stops.count, 1)
+        h.deliverInventory(index: 1)
+        XCTAssertFalse(h.model.running)
+        XCTAssertEqual(h.discoveries.count, 3, "One fresh read follows coalesced notifications")
+    }
+
+    func testDiscoveryTimeoutStopsRoutesAndBlocksRestartUntilRecovery() {
+        let h = Harness(asyncDiscovery: true)
+        h.deliverInventory(); h.start()
+        h.model.discoveryExpired(request: 2)
+        XCTAssertTrue(h.model.discoveryTimedOut)
+        XCTAssertFalse(h.model.running)
+        h.model.start()
+        XCTAssertEqual(h.engine.starts.count, 1)
+        h.deliverInventory(index: 1)
+        XCTAssertFalse(h.model.discoveryTimedOut)
+        XCTAssertFalse(h.model.running, "Recovery never auto-starts")
+    }
+
+    func testUnrelatedDeviceIssueIsVisibleWithoutStoppingSelectedRoutes() {
+        let h = Harness(asyncDiscovery: true)
+        h.deliverInventory(); h.model.refresh(); h.start()
+        // The first in-flight inventory predates startup and is discarded.
+        h.deliverInventory(index: 1)
+        h.deliverInventory(index: 2, issues: ["Unselected device disappeared"])
+        XCTAssertTrue(h.model.running)
+        XCTAssertEqual(h.model.inventoryIssues, ["Unselected device disappeared"])
+        XCTAssertTrue(h.engine.stops.isEmpty)
+    }
+
     func testEndpointInputRequestsPermissionWithoutValidRoutingAndStartsOnlyAfterRetry() async throws {
         let h = Harness(permission: .notDetermined)
         h.model.configuration = RoutingConfiguration(headsetMicUID: "headset")
@@ -441,17 +496,21 @@ private final class Harness {
     let defaults: UserDefaults
     let suite = "XboxVoiceDeck.lifecycle.\(UUID().uuidString)"
     var model: DeckModel!
-    init(permission: AVAuthorizationStatus = .authorized) {
+    var discoveries: [(Result<DeviceInventory, Error>) -> Void] = []
+    init(permission: AVAuthorizationStatus = .authorized, asyncDiscovery: Bool = false) {
         self.permission = permission
         defaults = UserDefaults(suiteName: suite)!
         model = DeckModel(services: DeckServices(engine: engine, enumerate: { [unowned self] in
             if let enumerationFailure = self.enumerationFailure { throw enumerationFailure }; return self.inventory
         }, authorization: { [unowned self] in self.permission }, requestPermission: { [unowned self] in
             self.permissionRequests.append($0)
-        }, now: { [unowned self] in self.now }, defaults: defaults, watcher: nil, runtimeEvents: false, simulated: true, endpointTester: endpointTester))
+        }, now: { [unowned self] in self.now }, defaults: defaults, watcher: nil, runtimeEvents: false, simulated: true, endpointTester: endpointTester, discover: asyncDiscovery ? { [unowned self] in self.discoveries.append($0) } : nil))
         model.configuration = RoutingConfiguration(headsetMicUID: "headset", headsetOutputUID: "headset", xboxInputUID: "usb", xboxOutputUID: "usb")
     }
     deinit { defaults.removePersistentDomain(forName: suite) }
+    func deliverInventory(index: Int = 0, issues: [String] = []) {
+        discoveries[index](.success(DeviceInventory(devices: inventory, issues: issues)))
+    }
     func start() { model.start(); completeStart() }
     func completeStart() { engine.starts.last!(.success(try! model.configuration.resolve(in: inventory))) }
     static func snapshot(count: UInt64) -> RoutingSnapshot {

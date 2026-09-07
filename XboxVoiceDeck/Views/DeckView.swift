@@ -13,8 +13,10 @@ struct DeckView: View {
                     Text("Phase 2 software · Physical calibration pending").foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button(model.running ? "Stop routing" : "Start muted") { model.running ? model.stop() : model.start() }
-                    .disabled(model.busy || model.permissionRequestPending || tests.busy).keyboardShortcut(.return, modifiers: .command)
+                Button(model.stopping ? "Stopping…" : model.busy ? "Cancel startup" : model.running ? "Stop routing" : "Start muted") {
+                    if model.running || model.busy { model.stop() } else { model.start() }
+                }
+                    .disabled(model.stopping || (!model.busy && model.permissionRequestPending) || tests.busy || (!model.running && !model.busy && model.discoveryTimedOut)).keyboardShortcut(.return, modifiers: .command)
                     .accessibilityIdentifier("routing.startStop")
             }
             if model.isSimulated {
@@ -33,6 +35,16 @@ struct DeckView: View {
                         Button("Microphone settings") { model.openMicrophoneSettings() }
                     }
                 }.padding(10).background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+            }
+            if !model.inventoryIssues.isEmpty {
+                Text(model.inventoryIssues.joined(separator: "\n"))
+                    .font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                    .accessibilityIdentifier("routing.inventoryWarning")
+            }
+            if let xbox = model.devices.first(where: { $0.uid == model.configuration.xboxOutputUID }),
+               xbox.id == model.defaultOutput || xbox.id == model.alertOutput {
+                Text("Xbox output is also a macOS sound/alerts destination. Change it in System Settings → Sound before connecting the controller. Other apps' audio bypasses this app's limiter.")
+                    .font(.callout).foregroundStyle(.orange).accessibilityIdentifier("routing.systemOutputWarning")
             }
             TabView(selection: $selectedTab) {
                 routing.tabItem { Label("Routing", systemImage: "cable.connector") }.tag(0)
@@ -89,7 +101,7 @@ struct DeckView: View {
                     Button("Save selection") { model.saveConfiguration() }
                     Button("Refresh devices") { model.refresh() }
                 }
-                Text("128 frames is the starting candidate. Unsupported requests show an error. Buffer changes affect the selected device for other apps too; original sizes are restored when routing stops. Prefer 48 kHz in Audio MIDI Setup.")
+                Text("128 frames is the starting candidate. Unsupported requests show an error. Buffer changes affect the selected device for other apps too; restoration is attempted when routing stops and failures are reported. Prefer 48 kHz in Audio MIDI Setup.")
                     .font(.caption).foregroundStyle(.secondary)
                 Divider()
                 Text("Physical routes").font(.headline)

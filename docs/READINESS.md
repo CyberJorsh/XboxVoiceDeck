@@ -4,7 +4,7 @@ This pass prepares software and a repeatable first-run procedure. It does not ce
 
 ## Confirm the actual equipment
 
-Record the Mac model and macOS version from About This Mac. The intended Mac is reportedly a 14-inch model, but its exact chip/model is still to be confirmed. The app supports Apple Silicon and macOS 14 or later; a development-host build does not establish acceptance on your M1-family Mac.
+Record the Mac model and macOS version from About This Mac. The supplied test-machine diagnostics report MacBookPro18,3 on Apple Silicon. Confirm the current machine and devices again at the start of the session. The app supports Apple Silicon and macOS 14 or later; a development-host build does not establish acceptance on your M1-family Mac.
 
 The exact USB sound card and CTIA splitter are still unknown. Check their product numbers and specifications before connecting signals: USB input type (microphone versus line), mono versus true stereo capture, output level, splitter contact wiring, and suitable attenuation/bias isolation/loading for the controller microphone input. The app cannot infer analog suitability from a device name. Follow [HARDWARE_SETUP.md](HARDWARE_SETUP.md); do not use a straight cable as proof that levels are compatible.
 
@@ -51,3 +51,13 @@ Optional virtual loopback can later exercise nonzero routing without physical sp
 Use the full staged [hardware checklist](HARDWARE_SETUP.md), starting with the controller mic branch disconnected until its interface is checked. Verify the HyperX physical mute against the input meter, incoming game audio, headphone channel mapping, safe Xbox calibration and absence of game-audio return into chat. Then test stop/bypass, device removal, sleep, sustained duplex operation and measured latency.
 
 Passing simulated tests reduces software risk. It does not replace the 30-minute physical run, listening tests or electrical checks on the intended Mac, headset, adapter and controller.
+
+## First session with 0.4.1 (6)
+
+1. Rebuild the updated source and open the resulting **XboxVoiceDeck.app** bundle. Copy Diagnostics and confirm **0.4.1 (6)** so an older build is not mistaken for the fix. Do not reset microphone permission or erase saved settings as an update step.
+2. Keep USB output disconnected from the controller microphone while checking levels/interfaces. Keep macOS audio, alerts and other applications off that output.
+3. Request microphone access using the independent button. Test the headset input and operate the HyperX physical mute; stop if the meter still follows the Mac's internal microphone instead.
+4. The reported C-Media adapter has **one input channel**. Turn off **Stereo Xbox input**. Confirm Xbox audio reaches that input without analog clipping; mono capture cannot preserve stereo positioning.
+5. Try **128 frames** and **Start muted**. Delayed successful buffer changes now wait for acknowledgement. If the adapter rejects or times out, inspect the reported error and Audio MIDI Setup, then try **Keep hardware**. Do not keep increasing output gain to solve a routing failure.
+6. At 48 kHz with 512-frame buffers at both ends, the software budget is about **54.7 ms** before device latency; at 128 frames it is about **14.7 ms**. These are estimates, not measurements. Prioritize stable muted capture before latency tuning.
+7. Test Cancel startup, mute, bypass and stop, then complete the electrical, audible-output and 30-minute checks above. A discovery timeout leaves audio stopped and requires explicit restart after recovery. If the driver never responds, stop testing and restart the app/Mac; software cannot repair a wedged driver or certify a straight cable's electrical compatibility.

@@ -48,6 +48,26 @@ final class ReadinessUITests: XCTestCase {
         return checkbox.exists ? checkbox : app.switches[id]
     }
 
+    func testPendingStartupCanBeCancelledFromMainButton() {
+        launch("startup-pending")
+        app.buttons["routing.startStop"].click()
+        let cancel = app.buttons["routing.startStop"]
+        XCTAssertEqual(cancel.label, "Cancel startup")
+        XCTAssertTrue(cancel.isEnabled)
+        cancel.click()
+        waitText("routing.status", contains: "STOPPED")
+        XCTAssertEqual(cancel.label, "Start muted")
+    }
+
+    func testSystemOutputWarningAppearsInRoutingAndPreflight() {
+        launch("system-output")
+        XCTAssertTrue(app.staticTexts["routing.systemOutputWarning"].exists)
+        tab("Preflight")
+        let warning = app.descendants(matching: .any)["preflight.system-output"].firstMatch
+        XCTAssertTrue(warning.exists)
+        XCTAssertTrue(app.buttons["routing.startStop"].isEnabled, "Warning must leave muted diagnostics available")
+    }
+
     func testMissingDevicesRemainBlockedAndShowActionableError() {
         launch("missing")
         tab("Preflight")

@@ -5,6 +5,14 @@ import OSLog
 
 @MainActor
 final class DeckModel: ObservableObject {
+    @Published private(set) var inventoryIssues: [String] = []
+    @Published private(set) var defaultOutput: UInt32?
+    @Published private(set) var alertOutput: UInt32?
+    @Published private(set) var discoveryPending = false
+    @Published private(set) var discoveryTimedOut = false
+    private var discoveryGeneration: UInt64 = 0
+    private var discoveryDeadline: DispatchWorkItem?
+    private var refreshAgain = false
     @Published var devices: [AudioEndpoint] = []
     @Published var configuration = RoutingConfiguration() {
         didSet { endpointTests.validate(devices: devices, configuration: configuration, captureAllowed: microphoneAuthorization == .authorized) }
@@ -58,7 +66,8 @@ final class DeckModel: ObservableObject {
     private var sessionGeneration: UInt64 = 0
     private var terminationObserver: NSObjectProtocol?
     private var startGate = RoutingStartGate()
-    private var stopping = false
+    @Published private(set) var stopping = false
+    private var routingStartupPending = false
 
     init(services: DeckServices = .live()) {
         self.services = services
@@ -106,8 +115,46 @@ final class DeckModel: ObservableObject {
 
     func refresh() {
         refreshMicrophoneAuthorization()
+        guard let discover = services.discover else {
+            applyInventory(Result { DeviceInventory(devices: try services.enumerate()) })
+            return
+        }
+        guard !discoveryPending else { refreshAgain = true; return }
+        discoveryPending = true
+        discoveryGeneration &+= 1
+        let request = discoveryGeneration
+        let session = sessionGeneration
+        let deadline = DispatchWorkItem { [weak self] in self?.discoveryExpired(request: request) }
+        discoveryDeadline = deadline
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: deadline)
+        discover { [weak self] result in
+            guard let self, self.discoveryGeneration == request else { return }
+            self.discoveryDeadline?.cancel(); self.discoveryDeadline = nil
+            self.discoveryPending = false
+            self.discoveryTimedOut = false
+            // Never stop a new session based on an inventory captured before startup.
+            if session == self.sessionGeneration { self.applyInventory(result) }
+            else { self.refreshAgain = true }
+            if self.refreshAgain { self.refreshAgain = false; self.refresh() }
+        }
+    }
+    func discoveryExpired(request: UInt64) {
+        guard discoveryPending, discoveryGeneration == request else { return }
+        discoveryTimedOut = true
+        inventoryIssues = ["Audio device discovery is not responding. Both routes are stopped. Reconnect the adapter or restart the app if the driver does not recover."]
+        endpointTests.stop("Test stopped: device discovery is not responding.")
+        if running || busy { stop(reason: "AUDIO ERROR — device discovery stalled") }
+        // Keep this single request in flight; never pile more work onto a stuck driver.
+    }
+    private func applyInventory(_ result: Result<DeviceInventory, Error>) {
         do {
-            let updated = try services.enumerate()
+            let inventory = try result.get()
+            let updated = inventory.devices
+            if inventoryIssues != inventory.issues {
+                for issue in inventory.issues { Logger.audio.error("\(issue, privacy: .public)") }
+                inventoryIssues = inventory.issues
+            }
+            defaultOutput = inventory.defaultOutput; alertOutput = inventory.alertOutput
             if devices != updated {
                 Logger.audio.info("Device inventory, rate, buffer or jack state changed")
                 devices = updated
@@ -129,12 +176,12 @@ final class DeckModel: ObservableObject {
         } catch {
             self.error = error.localizedDescription
             endpointTests.stop("AUDIO ERROR: device enumeration failed.")
-            if running { stop(reason: "AUDIO ERROR — device enumeration failed") }
+            if running || routingStartupPending { stop(reason: "AUDIO ERROR — device enumeration failed") }
         }
     }
 
     func start() {
-        guard !busy, !running, !permissionRequestPending, !endpointTests.busy else { return }
+        guard !busy, !running, !permissionRequestPending, !endpointTests.busy, !discoveryTimedOut else { return }
         refreshMicrophoneAuthorization()
         error = nil
         do { _ = try configuration.resolve(in: devices) }
@@ -194,7 +241,7 @@ final class DeckModel: ObservableObject {
         microphoneAuthorization = current
         endpointTests.validate(devices: devices, configuration: configuration, captureAllowed: current == .authorized)
         Logger.audio.info("Microphone authorization changed: \(current.rawValue)")
-        if current != .authorized && running {
+        if current != .authorized && (running || routingStartupPending) {
             error = "Microphone permission is no longer granted. Both routes have been stopped."
             stop(reason: "PERMISSION DENIED — restart explicitly after granting access")
         } else if current == .authorized && !running && !busy && status.hasPrefix("PERMISSION ") {
@@ -234,8 +281,17 @@ final class DeckModel: ObservableObject {
         xboxMuted = true; headphoneMuted = true; xboxDB = min(xboxDB, -60)
         status = "Starting explicit AUHAL routes…"
         let requested = configuration
+        routingStartupPending = true
         engine.start(requested) { [weak self] result in
-            guard let self, self.startGate.finish(request) else { return }
+            guard let self, self.startGate.accepts(request) else { return }
+            self.refreshMicrophoneAuthorization()
+            guard self.startGate.accepts(request) else { return }
+            guard self.microphoneAuthorization == .authorized else {
+                self.stop(reason: "PERMISSION DENIED — restart explicitly after granting access")
+                return
+            }
+            guard self.startGate.finish(request) else { return }
+            self.routingStartupPending = false
             self.busy = false
             switch result {
             case .success(let endpoints):
@@ -258,11 +314,13 @@ final class DeckModel: ObservableObject {
         endpointTests.stop()
         guard !stopping else { return }
         startGate.cancel()
+        routingStartupPending = false
         sessionGeneration &+= 1
         snapshotPending = false
         stopping = true
         cancelTone(); reviewedContext = nil
         busy = true
+        status = reason + " — stopping audio units"
         xboxMuted = true; headphoneMuted = true
         engine.stop { [weak self] errors in
             self?.stopping = false
@@ -333,7 +391,7 @@ final class DeckModel: ObservableObject {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") { NSWorkspace.shared.open(url) }
     }
     func prepareEndpointTest(_ role: EndpointRole) -> EndpointTestRequest? {
-        guard !running, !busy, !permissionRequestPending, !endpointTests.busy else { return nil }
+        guard !running, !busy, !permissionRequestPending, !endpointTests.busy, !discoveryTimedOut else { return nil }
         refreshMicrophoneAuthorization()
         if role.input && microphoneAuthorization != .authorized {
             requestMicrophoneAccess()
@@ -344,7 +402,7 @@ final class DeckModel: ObservableObject {
         catch { self.error = error.localizedDescription; return nil }
     }
     func startEndpointTest(_ request: EndpointTestRequest) {
-        guard !running, !busy, !permissionRequestPending, !endpointTests.busy else { return }
+        guard !running, !busy, !permissionRequestPending, !endpointTests.busy, !discoveryTimedOut else { return }
         refreshMicrophoneAuthorization()
         do {
             let current = try EndpointTestRequest(role: request.role, configuration: configuration, devices: devices)
@@ -380,6 +438,9 @@ final class DeckModel: ObservableObject {
         }
         lines.append("Configured channels: mic \(configuration.micChannel + 1), Xbox first \(configuration.xboxFirstChannel + 1), \(configuration.xboxStereo ? "stereo" : "mono"); requested buffer \(configuration.requestedBuffer)")
         lines.append("Endpoint test: \(endpointTests.request?.role.title ?? "none"); \(endpointTests.message); callbacks \(endpointTests.reading.callbacks), peak \(endpointTests.reading.peak), error \(endpointTests.reading.error)")
+        lines += ["Device discovery: \(discoveryPending ? "in progress" : "idle"), timed out: \(discoveryTimedOut)",
+                  "macOS output ID: \(defaultOutput.map(String.init) ?? "unknown"); alerts output ID: \(alertOutput.map(String.init) ?? "unknown")"]
+        lines += inventoryIssues
         for device in devices {
             lines += ["\n\(device.name) — \(device.manufacturer)", device.summary,
                       "Rates: \(device.supportedRates); clock domain \(device.clockDomain)",

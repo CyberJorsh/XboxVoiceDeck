@@ -32,7 +32,7 @@ int32_t DeckSafetyError(DeckSafety *safety);
 DeckRoute *DeckRouteCreate(double inputRate, double outputRate, uint32_t inputBuffer,
                            uint32_t outputBuffer, uint32_t channels, bool xbox);
 void DeckRouteDestroy(DeckRoute *route);
-// Control commands are serialized by AudioRoutingEngine. Render callbacks may
+// Control commands use AudioRoutingEngine's lifetime gate. Render callbacks may
 // independently latch mute/cancellation; level edits never override that latch.
 void DeckRouteSetGain(DeckRoute *route, float inputGain, float outputDB, bool mute);
 // Level edits never change mute state, including after a tone auto-mutes.
