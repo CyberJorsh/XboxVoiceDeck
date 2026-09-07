@@ -32,6 +32,7 @@ struct DeckServices {
     let watcher: DeckDeviceWatching?
     let runtimeEvents: Bool
     let simulated: Bool
+    var endpointTester: EndpointTesting = EndpointTestEngine()
 
     static func live() -> DeckServices {
         DeckServices(engine: AudioRoutingEngine(), enumerate: AudioDeviceManager.enumerate,

@@ -20,7 +20,7 @@ enum UITestFixture {
                 completion(permission.value == .authorized)
             },
             now: { ProcessInfo.processInfo.systemUptime }, defaults: defaults, watcher: nil,
-            runtimeEvents: true, simulated: true))
+            runtimeEvents: true, simulated: true, endpointTester: FixtureEndpointTester()))
         model.configuration = configuration
         model.status = "SIMULATED TEST SESSION — no hardware audio"
         return model
@@ -45,6 +45,25 @@ private final class FixtureMicrophonePermission {
     init(scenario: String) {
         value = scenario.hasPrefix("permission-") ? .notDetermined : scenario == "denied" ? .denied : .authorized
     }
+}
+
+private final class FixtureEndpointTester: EndpointTesting {
+    private var value: DeckEndpointTestSnapshot?
+    private var deadline: TimeInterval = 0
+    func start(_ request: EndpointTestRequest, completion: @escaping (Result<Void, Error>) -> Void) {
+        var value = DeckEndpointTestSnapshot(); value.active = true
+        value.rms = request.role.input ? 0.05 : 0.00005; value.peak = value.rms
+        self.value = value
+        deadline = ProcessInfo.processInfo.systemUptime + (request.role.input ? 10 : 2)
+        completion(.success(()))
+    }
+    func stop(completion: @escaping ([String]) -> Void) { value?.active = false; completion([]) }
+    func snapshot(completion: @escaping (DeckEndpointTestSnapshot?) -> Void) {
+        value?.callbacks += 1
+        value?.active = ProcessInfo.processInfo.systemUptime < deadline
+        completion(value)
+    }
+    func stopSynchronously() { value?.active = false }
 }
 
 private final class FixtureRoutingEngine: DeckRoutingEngine {

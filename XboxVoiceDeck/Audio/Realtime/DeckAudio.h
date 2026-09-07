@@ -58,3 +58,22 @@ OSStatus DeckInputCallback(void *context, AudioUnitRenderActionFlags *flags,
                           const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *data);
 OSStatus DeckOutputCallback(void *context, AudioUnitRenderActionFlags *flags,
                            const AudioTimeStamp *time, UInt32 bus, UInt32 frames, AudioBufferList *data);
+
+// Independent endpoint diagnostics: capture only meters, output only generates
+// a fixed quiet tone. No route, ring, microphone playback or gain controls.
+typedef struct DeckEndpointTest DeckEndpointTest;
+typedef struct {
+    float rms, peak, left, right;
+    uint64_t clips, callbacks, frames;
+    int32_t error;
+    bool active;
+} DeckEndpointTestSnapshot;
+DeckEndpointTest *DeckEndpointTestCreate(AudioUnit unit, bool capture, bool xbox,
+    double rate, uint32_t channels, uint32_t first, uint32_t measuredChannels, uint32_t maxFrames);
+void DeckEndpointTestCancel(DeckEndpointTest *test);
+void DeckEndpointTestDestroy(DeckEndpointTest *test);
+DeckEndpointTestSnapshot DeckEndpointTestRead(DeckEndpointTest *test);
+AURenderCallbackStruct DeckEndpointTestCallback(DeckEndpointTest *test);
+// Single realtime caller; deterministic seams for synthetic tests.
+void DeckEndpointTestFeed(DeckEndpointTest *test, const float *left, const float *right, uint32_t frames);
+void DeckEndpointTestRender(DeckEndpointTest *test, float *left, float *right, uint32_t frames);

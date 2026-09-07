@@ -2,6 +2,8 @@
 
 Written before engine implementation, 2026-09-05. Scope: Phase 0 and Phase 1 only.
 
+The 0.4.0 [independent endpoint tests](ENDPOINT_TESTS.md) use one separate AUHAL at a time while both routing paths are stopped. Capture only measures input; output only generates a fixed quiet tone. They do not change this duplex architecture or establish its physical acceptance.
+
 ## Decision
 
 Use four Apple HAL Output Audio Units (AUHAL), each bound to an explicit Core Audio AudioDeviceID. Two units capture; two render. Each capture-to-render route owns a separate fixed-capacity single-producer/single-consumer ring and asynchronous sample-rate converter. Swift manages devices, lifetime, permissions and SwiftUI. A small C11 realtime kernel owns callbacks, preallocated memory and lock-free atomics. There are no external packages, drivers, aggregate-device mutations or network services.

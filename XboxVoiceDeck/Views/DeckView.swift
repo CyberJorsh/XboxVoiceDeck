@@ -2,6 +2,8 @@ import SwiftUI
 
 struct DeckView: View {
     @ObservedObject var model: DeckModel
+    @ObservedObject var tests: EndpointTestModel
+    init(model: DeckModel) { self.model = model; self.tests = model.endpointTests }
     @State private var selectedTab = 0
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -12,7 +14,7 @@ struct DeckView: View {
                 }
                 Spacer()
                 Button(model.running ? "Stop routing" : "Start muted") { model.running ? model.stop() : model.start() }
-                    .disabled(model.busy || model.permissionRequestPending).keyboardShortcut(.return, modifiers: .command)
+                    .disabled(model.busy || model.permissionRequestPending || tests.busy).keyboardShortcut(.return, modifiers: .command)
                     .accessibilityIdentifier("routing.startStop")
             }
             if model.isSimulated {
@@ -55,6 +57,7 @@ struct DeckView: View {
                 if model.microphoneAuthorization != .authorized { MicrophoneAccessView(model: model) }
                 Text("Select each physical endpoint. Nothing uses the system default automatically.").font(.headline)
                 endpoint("1. Headset microphone", selection: $model.configuration.headsetMicUID, input: true)
+                EndpointTestView(model: model, tests: tests, role: .headsetMic)
                 if let mic = model.devices.first(where: { $0.uid == model.configuration.headsetMicUID }) {
                     Picker("Boom mic channel", selection: $model.configuration.micChannel) {
                         ForEach(0..<mic.inputChannels, id: \.self) { Text("Channel \($0 + 1)").tag($0) }
@@ -63,7 +66,9 @@ struct DeckView: View {
                 Text("Confirm that the selected input is the HyperX boom microphone. A built-in microphone name alone does not prove this.")
                     .font(.caption).foregroundStyle(.secondary)
                 endpoint("2. Headset output", selection: $model.configuration.headsetOutputUID, input: false)
+                EndpointTestView(model: model, tests: tests, role: .headsetOutput)
                 endpoint("3. Xbox audio input · USB input jack", selection: $model.configuration.xboxInputUID, input: true)
+                EndpointTestView(model: model, tests: tests, role: .xboxInput)
                 HStack {
                     Toggle("Stereo Xbox input", isOn: $model.configuration.xboxStereo)
                     if let usb = model.devices.first(where: { $0.uid == model.configuration.xboxInputUID }) {
@@ -75,6 +80,7 @@ struct DeckView: View {
                 Text("For a mono USB microphone jack, turn Stereo off. Mono is duplicated to both headphones. Use a proper stereo-to-mono adapter if required; do not short left and right together.")
                     .font(.caption).foregroundStyle(.secondary)
                 endpoint("4. Xbox mic output · USB output jack", selection: $model.configuration.xboxOutputUID, input: false)
+                EndpointTestView(model: model, tests: tests, role: .xboxOutput)
                 HStack {
                     Picker("Hardware buffer request", selection: $model.configuration.requestedBuffer) {
                         Text("Keep hardware").tag(UInt32(0))

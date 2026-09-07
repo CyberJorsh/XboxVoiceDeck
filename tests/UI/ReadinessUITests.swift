@@ -57,6 +57,37 @@ final class ReadinessUITests: XCTestCase {
         XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
     }
 
+    func testBothInputButtonsMeterIndependentlyAndStop() {
+        launch()
+        for role in ["headsetMic", "xboxInput"] {
+            let button = app.buttons["endpoint.test.\(role)"]
+            visible(button); button.click()
+            waitText("endpoint.status.\(role)", contains: "Reading input")
+            XCTAssertTrue(app.progressIndicators["endpoint.meter.\(role)"].exists)
+            XCTAssertFalse(app.buttons["routing.startStop"].isEnabled)
+            let stop = app.buttons["endpoint.stop.\(role)"]
+            visible(stop); stop.click()
+            waitText("endpoint.status.\(role)", contains: "Test stopped")
+            XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
+        }
+    }
+
+    func testBothOutputButtonsRequireConfirmationAndFinishWithoutRouting() {
+        launch()
+        for role in ["headsetOutput", "xboxOutput"] {
+            let button = app.buttons["endpoint.test.\(role)"]
+            visible(button); button.click()
+            let cancel = app.buttons["Cancel"].firstMatch
+            XCTAssertTrue(cancel.waitForExistence(timeout: 3)); cancel.click()
+            XCTAssertFalse(app.buttons["endpoint.stop.\(role)"].exists)
+            visible(button); button.click()
+            let confirm = app.buttons["endpoint.confirm"]
+            XCTAssertTrue(confirm.waitForExistence(timeout: 3)); confirm.click()
+            waitText("endpoint.status.\(role)", contains: "Test finished")
+            XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
+        }
+    }
+
     func testPermissionDeniedStaysStopped() {
         launch("denied")
         app.buttons["routing.startStop"].click()

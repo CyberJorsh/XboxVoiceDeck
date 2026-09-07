@@ -4,7 +4,7 @@ Version 0.3.1 separates microphone permission from routing setup. **Allow microp
 
 ## If Xbox Voice Deck is missing from Microphone settings
 
-1. Quit the old app and open the newly built **XboxVoiceDeck.app** using Finder or `open build/DerivedData/Build/Products/Release/XboxVoiceDeck.app`. Do not run its internal executable directly. Copy diagnostics should show version **0.3.1 (4)**.
+1. Quit the old app and open the newly built **XboxVoiceDeck.app** using Finder or `open build/DerivedData/Build/Products/Release/XboxVoiceDeck.app`. Do not run its internal executable directly. The current endpoint-test build is **0.4.0 (5)**; the independent permission action was introduced in 0.3.1 (4).
 2. Open Preflight and click **Allow microphone access**. Respond to the macOS dialog. Requesting permission does not require the four endpoints to be configured.
 3. If previously denied, open **System Settings → Privacy & Security → Microphone**, enable Xbox Voice Deck and return to the app. Click **Refresh permission** if needed. If macOS asks you to quit/reopen the app, do so.
 4. If access is restricted, check the Mac's Screen Time or administrator policy. The app cannot override these restrictions.

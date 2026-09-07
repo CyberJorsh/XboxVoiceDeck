@@ -9,6 +9,7 @@ A native Swift/SwiftUI macOS wired audio bridge for the HyperX Cloud III boom mi
 * A native Xcode app and hostless XCTest target; no package dependencies.
 * Core Audio device inventory with ID, channel counts, nominal/supported rates, buffer/range, manufacturer, clock domain, device/stream latency and safety offsets.
 * Four explicit endpoint selectors, stable UID selection persistence, mic channel choice and mono/stereo Xbox capture. No default-device fallback.
+* Independent **Test input** / **Test output** buttons beside all four selectors. Inputs show live meters for up to ten seconds without playback; outputs require confirmation and play a fixed quiet two-second tone. See [endpoint tests](docs/ENDPOINT_TESTS.md).
 * Two independent routes using four Apple AUHAL units. Each route has a preallocated C11 SPSC ring, windowed-sinc adaptive sample-rate converter, gain/mute, meters and buffer counters. Swift owns device/control/UI work; audio callbacks stay entirely in C.
 * 44.1 and 48 kHz device formats; Float32 internally, with one adaptive conversion per direction. 48 kHz is preferred but hardware rates are never changed silently.
 * Requested buffer sizes 32/64/128/256/512 frames, with range/readback checks and a “Keep hardware” option. 128 is the initial candidate; the lowest stable size requires hardware testing. Changes can affect other apps using that device.

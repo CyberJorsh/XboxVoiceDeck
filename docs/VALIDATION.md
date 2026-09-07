@@ -141,3 +141,11 @@ The testing Mac reported authorization `0` (not determined) together with duplic
 Local validation: **65 unit tests passed** (30 kernel/configuration/safety, 27 model lifecycle and eight preflight/report cases), plus the ten healthy clock schedules, two fault schedules, two concurrency scenarios and sanitizers. Release build and signature verification passed; the bundle retains its microphone usage description and audio-input entitlement. All **nine native UI tests compiled**; execution is left to hosted CI. Logs: `artifacts/permission-fix-verified-tests.log`, `artifacts/permission-fix-release.log` and `artifacts/permission-fix-ui-build.log` (local only).
 
 No microphone request, audio capture or TCC reset was performed on the development Mac. The actual permission dialog and four-endpoint audio still require testing on the M1. Its supplied inventory does not establish HyperX boom-mic capture, and its USB adapter reports only one capture channel.
+
+## Independent endpoint tests (0.4.0)
+
+All four selectors now have an isolated test action backed by one explicitly bound AUHAL. Input tests compute meters only; confirmed output tests generate fixed quiet tones with ramps, duration limits and cancellation. Neither full routing nor another endpoint test may run concurrently. See [ENDPOINT_TESTS.md](ENDPOINT_TESTS.md).
+
+Local validation: **77 XCTest cases passed** (30 kernel/configuration/safety, 30 routing-model lifecycle, eight preflight/report, four endpoint-kernel and five endpoint-model cases). Release build and signature verification passed. Existing clock/fault/concurrency simulations passed. An additional 500-cycle endpoint render/cancel/snapshot stress and oversized-callback silence check passed normally, under ASan/UBSan and under TSan. Logs: `artifacts/endpoint-tests-final.log` and `artifacts/endpoint-release.log` (ignored). The native UI suite adds input and output test-button flows for execution in hosted CI; its responses are simulated.
+
+No actual input unit or audible test tone was started on the development Mac. Real device capture, headphone channel order, controller reception, shutdown on the actual USB driver and the M1 permission dialog remain physical retest items. These software checks do not certify analog levels or simultaneous duplex routing.

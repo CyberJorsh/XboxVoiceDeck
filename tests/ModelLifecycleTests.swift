@@ -4,6 +4,48 @@ import Combine
 
 @MainActor
 final class ModelLifecycleTests: XCTestCase {
+    func testEndpointInputRequestsPermissionWithoutValidRoutingAndStartsOnlyAfterRetry() async throws {
+        let h = Harness(permission: .notDetermined)
+        h.model.configuration = RoutingConfiguration(headsetMicUID: "headset")
+        XCTAssertNil(h.model.prepareEndpointTest(.headsetMic))
+        XCTAssertEqual(h.permissionRequests.count, 1)
+        XCTAssertTrue(h.endpointTester.starts.isEmpty)
+        h.permission = .authorized; h.permissionRequests[0](true)
+        await Task { @MainActor in }.value
+        let request = try XCTUnwrap(h.model.prepareEndpointTest(.headsetMic))
+        h.model.startEndpointTest(request)
+        XCTAssertEqual(h.endpointTester.requests.map(\.role), [.headsetMic])
+        XCTAssertTrue(h.engine.starts.isEmpty)
+    }
+
+    func testEndpointTestsAndRoutingExcludeEachOtherAndBypassStopsTests() throws {
+        let h = Harness()
+        h.model.startEndpointTest(try XCTUnwrap(h.model.prepareEndpointTest(.headsetOutput)))
+        h.model.start()
+        XCTAssertTrue(h.engine.starts.isEmpty)
+        h.endpointTester.starts[0](.success(()))
+        let levels = [h.model.xboxDB, h.model.headphoneDB]
+        h.model.bypass()
+        XCTAssertFalse(h.model.endpointTests.busy)
+        XCTAssertEqual([h.model.xboxDB, h.model.headphoneDB], levels)
+        XCTAssertTrue(h.model.xboxMuted); XCTAssertTrue(h.model.headphoneMuted)
+        h.start()
+        XCTAssertNil(h.model.prepareEndpointTest(.xboxOutput))
+    }
+
+    func testOutputNeedsNoCapturePermissionAndRejectsStaleConfirmation() throws {
+        let h = Harness(permission: .denied)
+        let request = try XCTUnwrap(h.model.prepareEndpointTest(.xboxOutput))
+        h.model.configuration.xboxOutputUID = "headset"
+        h.model.startEndpointTest(request)
+        XCTAssertTrue(h.endpointTester.starts.isEmpty)
+        XCTAssertNotNil(h.model.error)
+        h.model.startEndpointTest(try XCTUnwrap(h.model.prepareEndpointTest(.xboxOutput)))
+        XCTAssertEqual(h.endpointTester.starts.count, 1)
+        XCTAssertTrue(h.permissionRequests.isEmpty)
+        h.model.handleSleep()
+        XCTAssertFalse(h.model.endpointTests.busy)
+    }
     func testMissingSelectionNeverRequestsPermissionOrStartsEngine() {
         let h = Harness(permission: .notDetermined)
         h.model.configuration = RoutingConfiguration()
@@ -395,6 +437,7 @@ private final class Harness {
     var permissionRequests: [(Bool) -> Void] = []
     var now: TimeInterval = 0
     let engine = MockRoutingEngine()
+    let endpointTester = MockEndpointTester()
     let defaults: UserDefaults
     let suite = "XboxVoiceDeck.lifecycle.\(UUID().uuidString)"
     var model: DeckModel!
@@ -405,7 +448,7 @@ private final class Harness {
             if let enumerationFailure = self.enumerationFailure { throw enumerationFailure }; return self.inventory
         }, authorization: { [unowned self] in self.permission }, requestPermission: { [unowned self] in
             self.permissionRequests.append($0)
-        }, now: { [unowned self] in self.now }, defaults: defaults, watcher: nil, runtimeEvents: false, simulated: true))
+        }, now: { [unowned self] in self.now }, defaults: defaults, watcher: nil, runtimeEvents: false, simulated: true, endpointTester: endpointTester))
         model.configuration = RoutingConfiguration(headsetMicUID: "headset", headsetOutputUID: "headset", xboxInputUID: "usb", xboxOutputUID: "usb")
     }
     deinit { defaults.removePersistentDomain(forName: suite) }
