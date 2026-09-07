@@ -82,7 +82,7 @@ final class ReadinessUITests: XCTestCase {
             dialog.buttons["Cancel"].click()
             XCTAssertFalse(app.buttons["endpoint.stop.\(role)"].exists)
             visible(button); button.click()
-            let confirm = dialog.buttons["endpoint.confirm"]
+            let confirm = dialog.buttons["Play quiet test"]
             XCTAssertTrue(confirm.waitForExistence(timeout: 3)); confirm.click()
             waitText("endpoint.status.\(role)", contains: "Test finished")
             XCTAssertEqual(app.buttons["routing.startStop"].label, "Start muted")
