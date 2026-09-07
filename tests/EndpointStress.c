@@ -20,12 +20,17 @@ int main(void) {
     for (int i = 0; i < 500; ++i) {
         DeckEndpointTest *test = DeckEndpointTestCreate(NULL, false, true, 48000, 2, 0, 2, 128);
         assert(test);
+        DeckSafety *safety = DeckSafetyCreate(); assert(safety);
+        DeckEndpointTestSetSafety(test, safety);
         pthread_t thread;
         assert(pthread_create(&thread, NULL, render, test) == 0);
         for (int j = 0; j < 100; ++j) {
             DeckEndpointTestSnapshot snapshot = DeckEndpointTestRead(test);
             assert(isfinite(snapshot.peak));
-            if (j == 50) DeckEndpointTestCancel(test);
+            if (j == 50) {
+                if (i % 2) DeckEndpointTestCancel(test);
+                else DeckSafetyTrip(safety, -1);
+            }
         }
         assert(pthread_join(thread, NULL) == 0);
         float left[128], right[128];
@@ -33,6 +38,7 @@ int main(void) {
         for (int f = 0; f < 128; ++f) assert(left[f] == 0 && right[f] == 0);
         assert(!DeckEndpointTestRead(test).active);
         DeckEndpointTestDestroy(test);
+        DeckSafetyDestroy(safety);
     }
     // Oversized callbacks silence the actual supplied buffers before rejecting.
     DeckEndpointTest *test = DeckEndpointTestCreate(NULL, false, true, 48000, 1, 0, 1, 32);

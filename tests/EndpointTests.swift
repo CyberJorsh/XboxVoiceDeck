@@ -53,6 +53,18 @@ final class EndpointKernelTests: XCTestCase {
         XCTAssertTrue(samples.prefix(32).allSatisfy { $0 == 0 })
         XCTAssertTrue(samples.suffix(32).allSatisfy { $0 == 9 })
     }
+    func testCancelledStartupCannotEmitItsFirstToneBuffer() throws {
+        let safety = try XCTUnwrap(DeckSafetyCreate())
+        let test = try XCTUnwrap(DeckEndpointTestCreate(nil, false, true, 48000, 1, 0, 1, 128))
+        defer { DeckEndpointTestDestroy(test); DeckSafetyDestroy(safety) }
+        DeckSafetyTrip(safety, -1)
+        DeckEndpointTestSetSafety(test, safety)
+        var samples = [Float](repeating: 1, count: 128)
+        samples.withUnsafeMutableBufferPointer { DeckEndpointTestRender(test, $0.baseAddress, nil, 128) }
+        XCTAssertTrue(samples.allSatisfy { $0 == 0 })
+        XCTAssertFalse(DeckEndpointTestRead(test).active)
+        XCTAssertEqual(DeckEndpointTestRead(test).callbacks, 0)
+    }
     func testInvalidFormatAndChannelRangesAreRejected() {
         XCTAssertNil(DeckEndpointTestCreate(nil, true, false, 24000, 1, 0, 1, 128))
         XCTAssertNil(DeckEndpointTestCreate(nil, true, false, 48000, 1, 0, 2, 128))

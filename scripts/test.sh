@@ -23,7 +23,7 @@ for deck_sanitizer in none address,undefined thread; do
   deck_flags=(-O1)
   if [ "$deck_sanitizer" != none ]; then deck_flags+=("-fsanitize=$deck_sanitizer"); fi
   xcrun clang -g -std=gnu11 -Wall -Wextra -Werror "${deck_flags[@]}" -I XboxVoiceDeck/Audio/Realtime \
-    XboxVoiceDeck/Audio/Realtime/DeckEndpointTest.c tests/EndpointStress.c \
+    XboxVoiceDeck/Audio/Realtime/DeckEndpointTest.c XboxVoiceDeck/Audio/Realtime/DeckAudio.c tests/EndpointStress.c \
     -framework AudioToolbox -framework CoreAudio -o "build/tests/endpoint-$deck_sanitizer"
   "build/tests/endpoint-$deck_sanitizer"
 done

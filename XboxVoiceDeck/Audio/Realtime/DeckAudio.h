@@ -71,6 +71,8 @@ typedef struct {
 DeckEndpointTest *DeckEndpointTestCreate(AudioUnit unit, bool capture, bool xbox,
     double rate, uint32_t channels, uint32_t first, uint32_t measuredChannels, uint32_t maxFrames);
 void DeckEndpointTestCancel(DeckEndpointTest *test);
+// Bind before callbacks begin; caller retains safety until context destruction.
+void DeckEndpointTestSetSafety(DeckEndpointTest *test, DeckSafety *safety);
 void DeckEndpointTestDestroy(DeckEndpointTest *test);
 DeckEndpointTestSnapshot DeckEndpointTestRead(DeckEndpointTest *test);
 AURenderCallbackStruct DeckEndpointTestCallback(DeckEndpointTest *test);

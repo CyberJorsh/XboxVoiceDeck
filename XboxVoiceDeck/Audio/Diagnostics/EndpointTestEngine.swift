@@ -44,20 +44,35 @@ protocol EndpointTesting: AnyObject {
     func stopSynchronously()
 }
 
+private final class EndpointTestCancellation {
+    let safety: OpaquePointer
+    init() throws {
+        guard let safety = DeckSafetyCreate() else { throw AudioFailure("Cannot allocate endpoint cancellation state.") }
+        self.safety = safety
+    }
+    var cancelled: Bool { DeckSafetyError(safety) != 0 }
+    func cancel() { DeckSafetyTrip(safety, -1) }
+    deinit { DeckSafetyDestroy(safety) }
+}
+
 private final class EndpointTestSession {
     let unit: HALUnit
     let context: OpaquePointer
+    let cancellation: EndpointTestCancellation
     private var closed = false
 
-    init(_ request: EndpointTestRequest) throws {
+    init(_ request: EndpointTestRequest, cancellation: EndpointTestCancellation) throws {
+        self.cancellation = cancellation
         unit = try HALUnit(device: request.device, capture: request.role.input)
         guard let context = DeckEndpointTestCreate(unit.unit, request.role.input, request.role == .xboxOutput,
             unit.rate, unit.channels, UInt32(request.firstChannel), UInt32(request.measuredChannels), unit.maxFrames) else {
             throw AudioFailure("Cannot allocate lock-free endpoint test buffers.")
         }
         self.context = context
+        DeckEndpointTestSetSafety(context, cancellation.safety)
         do {
             try unit.attach(callback: DeckEndpointTestCallback(context))
+            guard !cancellation.cancelled else { throw AudioFailure("Endpoint test startup cancelled.") }
             try unit.start()
         } catch {
             let errors = close()
@@ -66,11 +81,16 @@ private final class EndpointTestSession {
     }
     func close() -> [String] {
         guard !closed else { return [] }; closed = true
+        cancellation.cancel()
         DeckEndpointTestCancel(context)
         let status = unit.close()
         if unit.disposed { DeckEndpointTestDestroy(context) }
         // On HAL disposal failure, retain the silenced context to prevent UAF.
-        if !unit.disposed { return ["Endpoint test disposal failed (\(status)); silenced memory retained. Quit and reopen the app."] }
+        if !unit.disposed {
+            // The quarantined C callback can still read its cancellation flag.
+            _ = Unmanaged.passRetained(cancellation)
+            return ["Endpoint test disposal failed (\(status)); silenced memory retained. Quit and reopen the app."]
+        }
         return status == noErr ? [] : ["Endpoint test shutdown: Core Audio error \(status)"]
     }
     deinit { for error in close() { Logger.audio.error("\(error, privacy: .public)") } }
@@ -81,15 +101,25 @@ final class EndpointTestEngine: EndpointTesting, @unchecked Sendable {
     private var session: EndpointTestSession?
     private var finalSnapshot: DeckEndpointTestSnapshot?
     private var watchdog: DispatchWorkItem?
+    // Control-thread lock only, never held across HAL calls or used by callbacks.
+    private let commandLock = NSLock()
+    private var cancellation: EndpointTestCancellation?
 
     func start(_ request: EndpointTestRequest, completion: @escaping (Result<Void, Error>) -> Void) {
+        let cancellation: EndpointTestCancellation
+        do { cancellation = try EndpointTestCancellation() }
+        catch { DispatchQueue.main.async { completion(.failure(error)) }; return }
+        commandLock.lock()
+        self.cancellation?.cancel(); self.cancellation = cancellation
+        commandLock.unlock()
         queue.async { [self] in
             do {
                 let errors = self.shutdown()
                 guard errors.isEmpty else { throw AudioFailure(errors.joined(separator: "\n")) }
                 self.finalSnapshot = nil
+                guard !cancellation.cancelled else { throw AudioFailure("Endpoint test startup cancelled.") }
                 try request.validateLive(AudioDeviceManager.enumerate())
-                let session = try EndpointTestSession(request)
+                let session = try EndpointTestSession(request, cancellation: cancellation)
                 self.session = session
                 let watchdog = DispatchWorkItem { [weak self, weak session] in
                     guard let self, let session, self.session === session else { return }
@@ -120,6 +150,7 @@ final class EndpointTestEngine: EndpointTesting, @unchecked Sendable {
         return errors
     }
     func stop(completion: @escaping ([String]) -> Void) {
+        cancelImmediately()
         queue.async { let errors = self.shutdown(); DispatchQueue.main.async { completion(errors) } }
     }
     func snapshot(completion: @escaping (DeckEndpointTestSnapshot?) -> Void) {
@@ -128,5 +159,8 @@ final class EndpointTestEngine: EndpointTesting, @unchecked Sendable {
             DispatchQueue.main.async { completion(snapshot) }
         }
     }
-    func stopSynchronously() { queue.sync { _ = shutdown() } }
+    private func cancelImmediately() {
+        commandLock.lock(); cancellation?.cancel(); commandLock.unlock()
+    }
+    func stopSynchronously() { cancelImmediately(); queue.sync { _ = shutdown() } }
 }

@@ -7,6 +7,7 @@
 
 struct DeckEndpointTest {
     AudioUnit unit;
+    DeckSafety *safety;
     bool capture, xbox;
     double rate;
     uint32_t channels, first, measured, maxFrames, position, duration;
@@ -20,6 +21,10 @@ struct DeckEndpointTest {
 };
 
 void DeckEndpointTestCancel(DeckEndpointTest *t) { atomic_store(&t->active, false); }
+void DeckEndpointTestSetSafety(DeckEndpointTest *t, DeckSafety *safety) { t->safety = safety; }
+static bool active(DeckEndpointTest *t) {
+    return atomic_load(&t->active) && (!t->safety || !DeckSafetyError(t->safety));
+}
 void DeckEndpointTestDestroy(DeckEndpointTest *t) {
     if (t) { free(t->buffers); free(t->storage); free(t); }
 }
@@ -58,7 +63,7 @@ DeckEndpointTest *DeckEndpointTestCreate(AudioUnit unit, bool capture, bool xbox
 static bool ready(DeckEndpointTest *t, uint32_t frames) {
     if (frames > t->maxFrames) { fail(t, kAudioUnitErr_TooManyFramesToProcess); return false; }
     if (t->position >= t->duration || mach_continuous_time() >= t->deadline) DeckEndpointTestCancel(t);
-    return atomic_load(&t->active);
+    return active(t);
 }
 static void meter(DeckEndpointTest *t, double l, double r, float peak, uint64_t clips, uint32_t frames) {
     atomic_store(&t->left, frames ? sqrt(l / frames) : 0);
@@ -75,7 +80,7 @@ void DeckEndpointTestFeed(DeckEndpointTest *t, const float *left, const float *r
     if (!left || (t->measured == 2 && !right)) { fail(t, kAudio_ParamError); return; }
     double l = 0, r = 0; float peak = 0; uint64_t clips = 0;
     uint32_t count = 0;
-    for (; count < frames && t->position < t->duration && atomic_load(&t->active); ++count, ++t->position) {
+    for (; count < frames && t->position < t->duration && active(t); ++count, ++t->position) {
         float a = left[count], b = t->measured == 2 ? right[count] : 0;
         if (!isfinite(a)) { a = 0; ++clips; }
         if (!isfinite(b)) { b = 0; ++clips; }
@@ -93,7 +98,7 @@ void DeckEndpointTestRender(DeckEndpointTest *t, float *left, float *right, uint
     if (t->capture || !ready(t, frames)) return;
     if (!left || (t->channels > 1 && !right)) { fail(t, kAudio_ParamError); return; }
     double l = 0, r = 0; float peak = 0;
-    for (uint32_t i = 0; i < frames && t->position < t->duration && atomic_load(&t->active); ++i, ++t->position) {
+    for (uint32_t i = 0; i < frames && t->position < t->duration && active(t); ++i, ++t->position) {
         uint32_t second = t->position / (uint32_t)t->rate;
         uint32_t local = t->position % (uint32_t)t->rate;
         double ramp = fmin(1, fmin(local, t->rate - 1 - local) / (0.01 * t->rate));
@@ -109,7 +114,7 @@ void DeckEndpointTestRender(DeckEndpointTest *t, float *left, float *right, uint
 }
 DeckEndpointTestSnapshot DeckEndpointTestRead(DeckEndpointTest *t) {
     return (DeckEndpointTestSnapshot){atomic_load(&t->rms), atomic_load(&t->peak), atomic_load(&t->left), atomic_load(&t->right),
-        atomic_load(&t->clips), atomic_load(&t->callbacks), atomic_load(&t->frames), atomic_load(&t->error), atomic_load(&t->active)};
+        atomic_load(&t->clips), atomic_load(&t->callbacks), atomic_load(&t->frames), atomic_load(&t->error), active(t)};
 }
 static OSStatus callback(void *context, AudioUnitRenderActionFlags *flags, const AudioTimeStamp *time,
     UInt32 bus, UInt32 frames, AudioBufferList *data) {
