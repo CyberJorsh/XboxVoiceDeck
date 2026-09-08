@@ -89,6 +89,8 @@ Settings are local UserDefaults for `com.justjorshin.XboxVoiceDeck`; endpoint/ch
 
 ## Troubleshooting and limitations
 
+For quiet/missing party voice, game audio returning into chat, or headphone buzz, follow the [live hardware troubleshooting guide](docs/LIVE_TROUBLESHOOTING.md). It includes the verified headset-mic source correction and local 6 dB input boost from the September 7 session; party voice reception remains unconfirmed. Updating the app does not apply these Mac audio settings.
+
 | Symptom | Check |
 | --- | --- |
 | Only built-in microphone/speakers listed | Connect headset and USB interface, Refresh, inspect Audio MIDI Setup. The app will not fabricate missing endpoints. |
